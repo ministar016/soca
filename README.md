@@ -12,7 +12,7 @@ Da biste promenili ime ovog repozitorijuma na GitHub-u, pratite ove korake:
 **Napomena:** Nakon promene imena repozitorijuma, svi klonovi i fork-ovi će automatski biti preusmereni na novo ime, ali preporučuje se ažuriranje URL-ova u lokalnim klonovima:
 
 ```bash
-git remote set-url origin https://github.com/ministar016/NOVO-IME.git
+git remote set-url origin https://github.com/ministar016/<NOVO-IME>.git
 ```
 
 ---
@@ -27,5 +27,5 @@ To change the repository name on GitHub, follow these steps:
 **Note:** After renaming the repository, all clones and forks will be automatically redirected to the new name, but it's recommended to update URLs in local clones:
 
 ```bash
-git remote set-url origin https://github.com/ministar016/NEW-NAME.git
+git remote set-url origin https://github.com/ministar016/<NEW-NAME>.git
 ```
