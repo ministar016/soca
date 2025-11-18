@@ -1,0 +1,3 @@
+bazel_workspace/robot_ros2/scripts/*.AppImage
+SOCA_Robot.AppDir/
+appimagetool-*.AppImage

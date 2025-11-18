@@ -7,7 +7,6 @@
 #include "geometry_msgs/msg/transform_stamped.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "rclcpp/rclcpp.hpp"
-#include "sensor_msgs/msg/joint_state.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "tf2/LinearMath/Quaternion.h"
 #include "tf2_ros/transform_broadcaster.h"
@@ -39,8 +38,6 @@ class RobotController : public rclcpp::Node {
         this->create_publisher<std_msgs::msg::String>("robot_status", 10);
     marker_pub_ = this->create_publisher<visualization_msgs::msg::Marker>(
         "robot_marker", 10);
-    joint_state_pub_ = this->create_publisher<sensor_msgs::msg::JointState>(
-        "joint_states", 10);
 
     // Subscribers
     cmd_vel_sub_ = this->create_subscription<geometry_msgs::msg::Twist>(
@@ -95,9 +92,6 @@ class RobotController : public rclcpp::Node {
 
     // Publish visualization marker
     publishMarker(now);
-
-    // Publish joint states
-    publishJointStates(now);
 
     // Publish TF transform
     publishTransform(now);
@@ -202,18 +196,6 @@ class RobotController : public rclcpp::Node {
     marker_pub_->publish(head_marker);
   }
 
-  void publishJointStates(const rclcpp::Time& now) {
-    auto joint_state = sensor_msgs::msg::JointState();
-    joint_state.header.stamp = now;
-
-    joint_state.name = {"left_arm_joint", "right_arm_joint"};
-    joint_state.position = {0.0, 0.0};
-    joint_state.velocity = {0.0, 0.0};
-    joint_state.effort = {0.0, 0.0};
-
-    joint_state_pub_->publish(joint_state);
-  }
-
   void publishTransform(const rclcpp::Time& now) {
     geometry_msgs::msg::TransformStamped transform;
     transform.header.stamp = now;
@@ -243,7 +225,6 @@ class RobotController : public rclcpp::Node {
   rclcpp::Publisher<geometry_msgs::msg::PointStamped>::SharedPtr position_pub_;
   rclcpp::Publisher<std_msgs::msg::String>::SharedPtr status_pub_;
   rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr marker_pub_;
-  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
 
   rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_sub_;
 

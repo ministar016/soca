@@ -1,0 +1,15 @@
+# Enable WORKSPACE support (Bazel 8+)
+common --enable_workspace
+
+# C++ settings
+build --cxxopt=-std=c++17
+build --host_cxxopt=-std=c++17
+
+# Python settings
+build --python_version=PY3
+
+# Performance
+build --jobs=8
+
+# Cache
+build --disk_cache=~/.cache/bazel

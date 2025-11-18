@@ -2,6 +2,187 @@ workspace(name = "bazel_workspace")
 
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
+# ROS2 Jazzy system dependencies
+new_local_repository(
+    name = "ros2",
+    path = "/opt/ros/jazzy",
+    build_file_content = """
+package(default_visibility = ["//visibility:public"])
+
+cc_library(
+    name = "rclcpp",
+    hdrs = glob([
+        "include/rclcpp/**/*.hpp",
+        "include/rclcpp/**/*.h",
+        "include/rcl/**/*.h",
+        "include/rcutils/**/*.h",
+        "include/rmw/**/*.h",
+        "include/rosidl_runtime_c/**/*.h",
+        "include/rosidl_runtime_cpp/**/*.hpp",
+        "include/rosidl_typesupport_c/**/*.h",
+        "include/rosidl_typesupport_cpp/**/*.hpp",
+        "include/rosidl_typesupport_introspection_c/**/*.h",
+        "include/rosidl_typesupport_introspection_cpp/**/*.hpp",
+        "include/rcl_interfaces/**/*.hpp",
+        "include/builtin_interfaces/**/*.hpp",
+    ]),
+    includes = [
+        "include",
+        "include/rclcpp",
+        "include/rcl",
+        "include/rosidl_runtime_cpp",
+    ],
+    linkopts = [
+        "-L/opt/ros/jazzy/lib",
+        "-lrclcpp",
+        "-lrcl",
+        "-lrcutils",
+        "-lrmw",
+        "-lrosidl_runtime_c",
+        "-lrosidl_typesupport_cpp",
+    ],
+)
+
+cc_library(
+    name = "std_msgs",
+    hdrs = glob(["include/std_msgs/**/*.hpp"]),
+    includes = ["include", "include/std_msgs"],
+    deps = [":rclcpp"],
+)
+
+cc_library(
+    name = "sensor_msgs",
+    hdrs = glob(["include/sensor_msgs/**/*.hpp"]),
+    includes = ["include", "include/sensor_msgs"],
+    deps = [":rclcpp", ":std_msgs"],
+)
+
+cc_library(
+    name = "geometry_msgs",
+    hdrs = glob(["include/geometry_msgs/**/*.hpp"]),
+    includes = ["include", "include/geometry_msgs"],
+    deps = [":rclcpp", ":std_msgs"],
+)
+
+cc_library(
+    name = "visualization_msgs",
+    hdrs = glob(["include/visualization_msgs/**/*.hpp"]),
+    includes = ["include", "include/visualization_msgs"],
+    deps = [":rclcpp", ":std_msgs", ":geometry_msgs"],
+)
+
+cc_library(
+    name = "tf2",
+    hdrs = glob(["include/tf2/**/*.hpp", "include/tf2/**/*.h"]),
+    includes = ["include", "include/tf2"],
+    linkopts = [
+        "-L/opt/ros/jazzy/lib",
+        "-ltf2",
+    ],
+)
+
+cc_library(
+    name = "tf2_ros",
+    hdrs = glob(["include/tf2_ros/**/*.hpp"]),
+    includes = ["include", "include/tf2_ros"],
+    linkopts = [
+        "-L/opt/ros/jazzy/lib",
+        "-ltf2_ros",
+    ],
+    deps = [":tf2", ":rclcpp"],
+)
+
+cc_library(
+    name = "cv_bridge",
+    hdrs = glob(["include/cv_bridge/**/*.hpp", "include/cv_bridge/**/*.h"]),
+    includes = ["include", "include/cv_bridge"],
+    linkopts = [
+        "-L/opt/ros/jazzy/lib",
+        "-lcv_bridge",
+    ],
+    deps = [":sensor_msgs"],
+)
+""",
+)
+
+# OpenCV system library
+new_local_repository(
+    name = "opencv",
+    path = "/usr",
+    build_file_content = """
+cc_library(
+    name = "opencv",
+    hdrs = glob([
+        "include/opencv4/**/*.hpp",
+        "include/opencv4/**/*.h",
+    ]),
+    includes = [
+        "include/opencv4",
+    ],
+    strip_include_prefix = "include/opencv4",
+    linkopts = [
+        "-lopencv_core",
+        "-lopencv_imgproc",
+        "-lopencv_highgui",
+        "-lopencv_videoio",
+        "-lopencv_imgcodecs",
+    ],
+    visibility = ["//visibility:public"],
+)
+""",
+)
+
+# Qt6 system library
+new_local_repository(
+    name = "qt6",
+    path = "/usr",
+    build_file_content = """
+cc_library(
+    name = "QtCore",
+    hdrs = glob(["include/x86_64-linux-gnu/qt6/QtCore/**/*.h"]),
+    includes = ["include/x86_64-linux-gnu/qt6", "include/x86_64-linux-gnu/qt6/QtCore"],
+    linkopts = ["-lQt6Core"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "QtWidgets",
+    hdrs = glob(["include/x86_64-linux-gnu/qt6/QtWidgets/**/*.h"]),
+    includes = ["include/x86_64-linux-gnu/qt6", "include/x86_64-linux-gnu/qt6/QtWidgets"],
+    linkopts = ["-lQt6Widgets"],
+    deps = [":QtCore", ":QtGui"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "QtGui",
+    hdrs = glob(["include/x86_64-linux-gnu/qt6/QtGui/**/*.h"]),
+    includes = ["include/x86_64-linux-gnu/qt6", "include/x86_64-linux-gnu/qt6/QtGui"],
+    linkopts = ["-lQt6Gui"],
+    deps = [":QtCore"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "QtOpenGL",
+    hdrs = glob(["include/x86_64-linux-gnu/qt6/QtOpenGL/**/*.h"]),
+    includes = ["include/x86_64-linux-gnu/qt6", "include/x86_64-linux-gnu/qt6/QtOpenGL"],
+    linkopts = ["-lQt6OpenGL"],
+    deps = [":QtCore", ":QtGui"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
+    name = "QtOpenGLWidgets",
+    hdrs = glob(["include/x86_64-linux-gnu/qt6/QtOpenGLWidgets/**/*.h"]),
+    includes = ["include/x86_64-linux-gnu/qt6", "include/x86_64-linux-gnu/qt6/QtOpenGLWidgets"],
+    linkopts = ["-lQt6OpenGLWidgets"],
+    deps = [":QtCore", ":QtGui", ":QtOpenGL", ":QtWidgets"],
+    visibility = ["//visibility:public"],
+)
+""",
+)
+
 # Rust rules
 http_archive(
     name = "rules_rust",
