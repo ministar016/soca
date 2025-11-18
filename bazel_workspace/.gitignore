@@ -1,0 +1,14 @@
+# Bazel
+bazel-*
+
+# Rust build artifacts
+rust_gui/target/
+rust_gui/Cargo.lock
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+*~
