@@ -9,6 +9,11 @@ bazel-genfiles/
 bazel-out/
 bazel-testlogs/
 
+# ROS2 build artifacts
+install/
+build/
+log/
+
 # C++ build artifacts
 *.o
 *.a

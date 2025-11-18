@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="bs">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SOCA - 3D Autonomous Vehicle Control</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            overflow: hidden;
+        }
+
+        #container {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        #ui {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 20px;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            min-width: 300px;
+            z-index: 1000;
+        }
+
+        #ui h2 {
+            margin: 0 0 15px 0;
+            color: #2c3e50;
+            font-size: 18px;
+        }
+
+        .status-indicator {
+            display: inline-block;
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            margin-right: 8px;
+        }
+
+        .status-connected { background-color: #27ae60; }
+        .status-disconnected { background-color: #e74c3c; }
+        .status-connecting { background-color: #f39c12; }
+
+        .control-group {
+            margin: 15px 0;
+        }
+
+        .control-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 600;
+            color: #34495e;
+        }
+
+        .control-row {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        button {
+            background: #3498db;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.3s;
+        }
+
+        button:hover {
+            background: #2980b9;
+        }
+
+        button:disabled {
+            background: #bdc3c7;
+            cursor: not-allowed;
+        }
+
+        .destination-btn {
+            background: #e74c3c;
+        }
+
+        .destination-btn:hover {
+            background: #c0392b;
+        }
+
+        .destination-btn.active {
+            background: #27ae60;
+        }
+
+        .destination-btn.active:hover {
+            background: #229954;
+        }
+
+        #log {
+            margin-top: 15px;
+            max-height: 200px;
+            overflow-y: auto;
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 5px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            border: 1px solid #dee2e6;
+        }
+
+        .log-entry {
+            margin: 2px 0;
+            padding: 2px 0;
+        }
+
+        .log-info { color: #17a2b8; }
+        .log-success { color: #28a745; }
+        .log-warning { color: #ffc107; }
+        .log-error { color: #dc3545; }
+
+        #vehicle-info {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(255, 255, 255, 0.9);
+            padding: 15px;
+            border-radius: 10px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
+            min-width: 250px;
+            z-index: 1000;
+        }
+
+        .info-row {
+            display: flex;
+            justify-content: space-between;
+            margin: 5px 0;
+        }
+
+        .info-label {
+            font-weight: 600;
+            color: #34495e;
+        }
+
+        .info-value {
+            color: #2c3e50;
+        }
+
+        .speed-high { color: #e74c3c; font-weight: bold; }
+        .speed-medium { color: #f39c12; }
+        .speed-low { color: #27ae60; }
+    </style>
+</head>
+<body>
+    <div id="ui">
+        <h2>🚗 SOCA Autonomous Vehicle Control</h2>
+
+        <div class="control-group">
+            <label>Status: <span class="status-indicator status-disconnected" id="connection-status"></span>
+                <span id="connection-text">Disconnected</span>
+            </label>
+        </div>
+
+        <div class="control-group">
+            <label>Vehicle Control:</label>
+            <div class="control-row">
+                <button id="start-btn">▶️ Start</button>
+                <button id="stop-btn" disabled>⏹️ Stop</button>
+                <button id="emergency-btn">🚨 Emergency Stop</button>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label>Destinations:</label>
+            <div class="control-row">
+                <button class="destination-btn" data-dest="warehouse">🏭 Warehouse</button>
+                <button class="destination-btn" data-dest="parking">🅿️ Parking</button>
+                <button class="destination-btn" data-dest="charging">🔋 Charging Station</button>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label>Manual Control:</label>
+            <div class="control-row">
+                <button id="forward-btn">↑ Forward</button>
+                <button id="left-btn">← Left</button>
+                <button id="right-btn">→ Right</button>
+                <button id="backward-btn">↓ Backward</button>
+            </div>
+        </div>
+
+        <div id="log">
+            <div class="log-entry log-info">[INFO] System initialized</div>
+        </div>
+    </div>
+
+    <div id="vehicle-info">
+        <h3>📊 Vehicle Status</h3>
+        <div class="info-row">
+            <span class="info-label">Position:</span>
+            <span class="info-value" id="position">0.00, 0.00, 0.00</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Speed:</span>
+            <span class="info-value" id="speed">0.00 m/s</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Battery:</span>
+            <span class="info-value" id="battery">100%</span>
+        </div>
+        <div class="info-row">
+            <span class="info-label">Status:</span>
+            <span class="info-value" id="vehicle-status">Stopped</span>
+        </div>
+    </div>
+
+    <div id="container"></div>
+
+    <script>
+        // Three.js 3D Scene Setup
+        let scene, camera, renderer, controls;
+        let vehicle, path = [];
+        let destinations = {
+            warehouse: { x: 20, z: 20 },
+            parking: { x: -20, z: -20 },
+            charging: { x: 0, z: 30 }
+        };
+
+        // WebSocket connection
+        let ws;
+        let reconnectInterval;
+
+        function init() {
+            // Scene setup
+            scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x87CEEB); // Sky blue
+
+            camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+            camera.position.set(30, 30, 30);
+
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            document.getElementById('container').appendChild(renderer.domElement);
+
+            // Controls
+            controls = new THREE.OrbitControls(camera, renderer.domElement);
+            controls.enableDamping = true;
+            controls.dampingFactor = 0.05;
+
+            // Lighting
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.6);
+            scene.add(ambientLight);
+
+            const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+            directionalLight.position.set(50, 50, 25);
+            directionalLight.castShadow = true;
+            directionalLight.shadow.mapSize.width = 2048;
+            directionalLight.shadow.mapSize.height = 2048;
+            scene.add(directionalLight);
+
+            // Ground
+            const groundGeometry = new THREE.PlaneGeometry(100, 100);
+            const groundMaterial = new THREE.MeshLambertMaterial({ color: 0x90EE90 });
+            const ground = new THREE.Mesh(groundGeometry, groundMaterial);
+            ground.rotation.x = -Math.PI / 2;
+            ground.receiveShadow = true;
+            scene.add(ground);
+
+            // Grid
+            const gridHelper = new THREE.GridHelper(100, 20, 0x000000, 0x000000);
+            gridHelper.material.opacity = 0.3;
+            gridHelper.material.transparent = true;
+            scene.add(gridHelper);
+
+            // Buildings/Obstacles
+            createBuilding(10, 5, 10, 0x8B4513); // Brown building
+            createBuilding(-15, 8, -10, 0x696969); // Gray building
+            createBuilding(25, 6, -5, 0xDC143C); // Red building
+
+            // Destinations
+            Object.keys(destinations).forEach(dest => {
+                const pos = destinations[dest];
+                createDestinationMarker(pos.x, pos.z, dest);
+            });
+
+            // Vehicle (car-like object)
+            createVehicle(0, 0, 0);
+
+            // WebSocket connection
+            connectWebSocket();
+
+            animate();
+        }
+
+        function createBuilding(x, height, z, color) {
+            const geometry = new THREE.BoxGeometry(4, height, 4);
+            const material = new THREE.MeshLambertMaterial({ color });
+            const building = new THREE.Mesh(geometry, material);
+            building.position.set(x, height/2, z);
+            building.castShadow = true;
+            scene.add(building);
+        }
+
+        function createDestinationMarker(x, z, type) {
+            const geometry = new THREE.CylinderGeometry(1, 1, 0.2, 16);
+            let color;
+            switch(type) {
+                case 'warehouse': color = 0x8B4513; break;
+                case 'parking': color = 0x4169E1; break;
+                case 'charging': color = 0xFFD700; break;
+            }
+            const material = new THREE.MeshLambertMaterial({ color });
+            const marker = new THREE.Mesh(geometry, material);
+            marker.position.set(x, 0.1, z);
+            scene.add(marker);
+
+            // Add label
+            const canvas = document.createElement('canvas');
+            const context = canvas.getContext('2d');
+            context.font = 'Bold 20px Arial';
+            context.fillStyle = 'rgba(255,255,255,1)';
+            context.fillText(type.toUpperCase(), 0, 20);
+
+            const texture = new THREE.CanvasTexture(canvas);
+            const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
+            const sprite = new THREE.Sprite(spriteMaterial);
+            sprite.position.set(x, 3, z);
+            sprite.scale.set(5, 2.5, 1);
+            scene.add(sprite);
+        }
+
+        function createVehicle(x, y, z) {
+            // Car body
+            const bodyGeometry = new THREE.BoxGeometry(2, 0.8, 4);
+            const bodyMaterial = new THREE.MeshLambertMaterial({ color: 0xFF0000 });
+            vehicle = new THREE.Mesh(bodyGeometry, bodyMaterial);
+            vehicle.position.set(x, y + 0.4, z);
+            vehicle.castShadow = true;
+            scene.add(vehicle);
+
+            // Wheels
+            const wheelGeometry = new THREE.CylinderGeometry(0.3, 0.3, 0.2, 16);
+            const wheelMaterial = new THREE.MeshLambertMaterial({ color: 0x333333 });
+
+            const wheelPositions = [
+                [-0.8, 0.3, 1.2], [0.8, 0.3, 1.2], // Front wheels
+                [-0.8, 0.3, -1.2], [0.8, 0.3, -1.2] // Rear wheels
+            ];
+
+            wheelPositions.forEach(pos => {
+                const wheel = new THREE.Mesh(wheelGeometry, wheelMaterial);
+                wheel.position.set(pos[0], pos[1], pos[2]);
+                wheel.rotation.z = Math.PI / 2;
+                wheel.castShadow = true;
+                vehicle.add(wheel);
+            });
+        }
+
+        function connectWebSocket() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            const wsUrl = `${protocol}//${window.location.host}/ws`;
+
+            updateConnectionStatus('connecting', 'Connecting...');
+
+            ws = new WebSocket(wsUrl);
+
+            ws.onopen = function(event) {
+                updateConnectionStatus('connected', 'Connected');
+                addLogEntry('success', 'WebSocket connected');
+                clearInterval(reconnectInterval);
+            };
+
+            ws.onmessage = function(event) {
+                try {
+                    const data = JSON.parse(event.data);
+                    handleWebSocketMessage(data);
+                } catch (e) {
+                    addLogEntry('error', `Invalid message: ${event.data}`);
+                }
+            };
+
+            ws.onclose = function(event) {
+                updateConnectionStatus('disconnected', 'Disconnected');
+                addLogEntry('warning', 'WebSocket disconnected, attempting reconnect...');
+                reconnectInterval = setInterval(connectWebSocket, 3000);
+            };
+
+            ws.onerror = function(error) {
+                updateConnectionStatus('disconnected', 'Connection Error');
+                addLogEntry('error', 'WebSocket error');
+            };
+        }
+
+        function handleWebSocketMessage(data) {
+            switch(data.type) {
+                case 'vehicle_position':
+                    updateVehiclePosition(data.x, data.y, data.z);
+                    break;
+                case 'vehicle_status':
+                    updateVehicleStatus(data);
+                    break;
+                case 'log':
+                    addLogEntry(data.level, data.message);
+                    break;
+                case 'path':
+                    updatePath(data.points);
+                    break;
+            }
+        }
+
+        function updateVehiclePosition(x, y, z) {
+            if (vehicle) {
+                vehicle.position.set(x, y + 0.4, z);
+                document.getElementById('position').textContent = `${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)}`;
+            }
+        }
+
+        function updateVehicleStatus(data) {
+            document.getElementById('speed').textContent = `${data.speed.toFixed(2)} m/s`;
+            document.getElementById('battery').textContent = `${data.battery}%`;
+            document.getElementById('vehicle-status').textContent = data.status;
+
+            // Color code speed
+            const speedElement = document.getElementById('speed');
+            speedElement.className = 'info-value';
+            if (data.speed > 5) speedElement.classList.add('speed-high');
+            else if (data.speed > 2) speedElement.classList.add('speed-medium');
+            else speedElement.classList.add('speed-low');
+        }
+
+        function updatePath(points) {
+            // Remove old path
+            path.forEach(line => scene.remove(line));
+            path = [];
+
+            if (points && points.length > 1) {
+                const geometry = new THREE.BufferGeometry().setFromPoints(
+                    points.map(p => new THREE.Vector3(p.x, 0.1, p.z))
+                );
+                const material = new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 3 });
+                const line = new THREE.Line(geometry, material);
+                scene.add(line);
+                path.push(line);
+            }
+        }
+
+        function updateConnectionStatus(status, text) {
+            const indicator = document.getElementById('connection-status');
+            const textElement = document.getElementById('connection-text');
+
+            indicator.className = `status-indicator status-${status}`;
+            textElement.textContent = text;
+        }
+
+        function addLogEntry(level, message) {
+            const log = document.getElementById('log');
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${level}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            log.appendChild(entry);
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function sendWebSocketMessage(type, data = {}) {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                ws.send(JSON.stringify({ type, ...data }));
+            } else {
+                addLogEntry('error', 'WebSocket not connected');
+            }
+        }
+
+        // Event listeners
+        document.getElementById('start-btn').addEventListener('click', () => {
+            sendWebSocketMessage('command', { action: 'start' });
+            document.getElementById('start-btn').disabled = true;
+            document.getElementById('stop-btn').disabled = false;
+        });
+
+        document.getElementById('stop-btn').addEventListener('click', () => {
+            sendWebSocketMessage('command', { action: 'stop' });
+            document.getElementById('start-btn').disabled = false;
+            document.getElementById('stop-btn').disabled = true;
+        });
+
+        document.getElementById('emergency-btn').addEventListener('click', () => {
+            sendWebSocketMessage('command', { action: 'emergency_stop' });
+        });
+
+        // Destination buttons
+        document.querySelectorAll('.destination-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const dest = btn.dataset.dest;
+                const pos = destinations[dest];
+                sendWebSocketMessage('navigate', { destination: dest, x: pos.x, z: pos.z });
+
+                // Visual feedback
+                document.querySelectorAll('.destination-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+            });
+        });
+
+        // Manual control buttons
+        document.getElementById('forward-btn').addEventListener('click', () => {
+            sendWebSocketMessage('manual_control', { direction: 'forward' });
+        });
+
+        document.getElementById('backward-btn').addEventListener('click', () => {
+            sendWebSocketMessage('manual_control', { direction: 'backward' });
+        });
+
+        document.getElementById('left-btn').addEventListener('click', () => {
+            sendWebSocketMessage('manual_control', { direction: 'left' });
+        });
+
+        document.getElementById('right-btn').addEventListener('click', () => {
+            sendWebSocketMessage('manual_control', { direction: 'right' });
+        });
+
+        function animate() {
+            requestAnimationFrame(animate);
+            controls.update();
+            renderer.render(scene, camera);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        window.addEventListener('resize', onWindowResize, false);
+
+        // Initialize everything
+        init();
+    </script>
+</body>
+</html>
