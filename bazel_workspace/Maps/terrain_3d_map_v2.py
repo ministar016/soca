@@ -429,6 +429,16 @@ route_x, route_y, route_z, route_spd, route_dist, route_ts = load_trust_route(
     JSONL_TRUST
 )
 
+# Koordinatni offset: UTM_E0/N0 odgovara starom centru mape (48.2310367, 11.6203496),
+# dok je LAT_CENTER/LON_CENTER pomjeren na (48.2295, 11.6219) da pokrije obje rute.
+# Svodimo sve rute na isti koordinatni sistem kao grid (x_m, y_m) relativno na LAT/LON centar,
+# inace se rute pojavljuju ~115m istocnije i ~17m juznije nego sto stvarno jesu.
+_ROUTE_DX = (11.6203496 - LON_CENTER) * 111320 * np.cos(np.radians(LAT_CENTER))  # ≈ -114.8m
+_ROUTE_DY = (48.2310367 - LAT_CENTER) * 111320  # ≈ +17.1m
+print(f"  Koordinatni offset ruta: dx={_ROUTE_DX:.1f}m  dy={_ROUTE_DY:.1f}m")
+route_x = [v + _ROUTE_DX for v in route_x]
+route_y = [v + _ROUTE_DY for v in route_y]
+
 # Downsample trust rute
 STEP = 5
 rx = route_x[::STEP]
@@ -444,6 +454,8 @@ print("")
 kroute_x, kroute_y, kroute_z, kroute_spd, kroute_dist, kroute_ts = load_trust_route(
     JSONL_KNOWN
 )
+kroute_x = [v + _ROUTE_DX for v in kroute_x]
+kroute_y = [v + _ROUTE_DY for v in kroute_y]
 KSTEP = 8  # veca ruta, veci korak
 krx = kroute_x[::KSTEP]
 kry = kroute_y[::KSTEP]
@@ -591,12 +603,18 @@ else:
 traces = [surf_trav, surf_sat]
 
 # ─ Surface: Trusted Area layer ─
+# Semantika boja (dobro se upari sa satelitskim snimkom u hybrid modu):
+#   tamno crvena  = apsolutna blokada (voda, zid)      → nikad ne idi
+#   svetlo crvena = moguća prepreka / prekinut put     → pazi
+#   amber         = šuma / teže prohodan teren         → otežano
+#   zelena        = evaluirano s mape, nepotvrdeno UGV → vjerovatno ok
+#   plava         = UGV potvrdio prolaz (trusted)      → idi
 colorscale_trust = [
-    [0.00, "rgb(0,0,180)"],    # voda / blokirano
-    [0.30, "rgb(255,80,0)"],   # prekinut put
-    [0.50, "rgb(200,180,0)"],  # suma / vegetacija
-    [0.70, "rgb(100,220,0)"],  # otvoreno zemljiste
-    [1.00, "rgb(0,255,50)"],   # UGV vec prosao
+    [0.00, "rgb(139,0,0)"],    # tamno crvena — apsolutna blokada
+    [0.30, "rgb(255,90,90)"],  # svetlo crvena — prekinut put / upozorenje
+    [0.50, "rgb(230,160,0)"],  # amber         — suma / teze prohodan
+    [0.70, "rgb(40,200,80)"],  # zelena        — evaluirano s mape, nije UGV
+    [1.00, "rgb(30,144,255)"], # plava         — UGV prosao, trusted
 ]
 surf_trust = go.Surface(
     x=XX,
@@ -899,11 +917,11 @@ if sat_b64:
       <div class="leg"><span class="leg-dot" style="background:mediumpurple"></span>KNOWN ROUTE ({kroute_dist[-1]:.0f} m)</div>
       <hr class="leg-sep"/>
       <div class="leg-head">Trusted Area sloj:</div>
-      <div class="leg"><span class="leg-dot" style="background:rgb(0,255,50)"></span>100% &ndash; UGV prosao</div>
-      <div class="leg"><span class="leg-dot" style="background:rgb(100,220,0)"></span>70% &ndash; Otvoreno</div>
-      <div class="leg"><span class="leg-dot" style="background:rgb(200,180,0)"></span>50% &ndash; &Scaron;uma</div>
-      <div class="leg"><span class="leg-dot" style="background:rgb(255,80,0)"></span>30% &ndash; Prekinut put</div>
-      <div class="leg"><span class="leg-dot" style="background:rgb(0,0,180)"></span>0% &ndash; Voda/Blokada</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(30,144,255)"></span>100% &ndash; UGV potv&rcaron;en (trusted)</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(40,200,80)"></span>70% &ndash; Evaluirano s mape</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(230,160,0)"></span>50% &ndash; &Scaron;uma / te&zcaron;e prohodan</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(255,90,90)"></span>30% &ndash; Prekinut put / upozorenje</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(139,0,0)"></span>0% &ndash; Apsolutna blokada</div>
     </div>
   </div>"""
 else:
@@ -928,7 +946,7 @@ full_html = f"""<!DOCTYPE html>
     #plot-wrap {{ flex: 1; min-width: 0; position: relative; }}
     #plot-wrap > div {{ width: 100% !important; height: 100% !important; }}
     #side-panel {{
-      width: 290px;
+      width: 380px;
       flex-shrink: 0;
       background: #0a0a1a;
       border-left: 1px solid rgba(255,255,255,0.12);
@@ -949,7 +967,8 @@ full_html = f"""<!DOCTYPE html>
     #sat-container {{
       position: relative;
       width: 100%;
-      aspect-ratio: 1 / 1;
+      flex: 1;
+      min-height: 280px;
       overflow: hidden;
       border: 1px solid rgba(255,255,255,0.15);
     }}
@@ -957,8 +976,8 @@ full_html = f"""<!DOCTYPE html>
       width: 100%;
       height: 100%;
       display: block;
-      object-fit: cover;
-      image-rendering: pixelated;
+      object-fit: fill;
+      image-rendering: crisp-edges;
     }}
     #sat-overlay {{
       position: absolute;
