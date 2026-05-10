@@ -85,14 +85,58 @@ def fetch_elevation_grid():
 
 
 lats, lons, elev = fetch_elevation_grid()
-from scipy.ndimage import gaussian_filter
+from scipy.ndimage import gaussian_filter, map_coordinates
 
 elev_s = gaussian_filter(elev.astype(float), sigma=1.5)
-print(f"Elevacija: {elev_s.min():.1f}-{elev_s.max():.1f}m")
+print(f"Elevacija (raw DEM): {elev_s.min():.1f}-{elev_s.max():.1f}m")
 
 x_m = (lons - LON_CENTER) * 111320 * np.cos(np.radians(LAT_CENTER))
 y_m = (lats - LAT_CENTER) * 111320
 XX, YY = np.meshgrid(x_m, y_m)
+
+
+# ── DEM kalibracija na GPS altitude ─────────────────────────────────────────
+# Open Elevation / SRTM za München regiju ima sistemski offset vs GPS (WGS84).
+# Kalibriramo DEM tako da mu medijan u GPS tocki odgovara medianu GPS altitude.
+# Relativni reljef (oblik terena) ostaje tocno isti - samo se pomicase na
+# pravu apsolutnu visinu.
+def _dem_at_xy(xs, ys):
+    """Vraca DEM visine (raw, bez kalibracije) za listu (x,y) metrickih kord."""
+    col = (np.array(xs) - x_m[0]) / (x_m[-1] - x_m[0]) * (GRID_N - 1)
+    row = (np.array(ys) - y_m[0]) / (y_m[-1] - y_m[0]) * (GRID_N - 1)
+    col = np.clip(col, 0, GRID_N - 1)
+    row = np.clip(row, 0, GRID_N - 1)
+    return map_coordinates(elev_s, [row, col], order=1, mode="nearest")
+
+
+def _read_gps_alt(jsonl_path):
+    alts, xs, ys = [], [], []
+    with open(jsonl_path) as f:
+        for line in f:
+            try:
+                p = json.loads(line.strip())["payload"]
+                alts.append(p["altitude"])
+                xs.append(p["easting"] - UTM_E0)
+                ys.append(p["northing"] - UTM_N0)
+            except Exception:
+                continue
+    return np.array(alts), np.array(xs), np.array(ys)
+
+
+gps_alt_t, gps_x_t, gps_y_t = _read_gps_alt(JSONL_TRUST)
+gps_alt_k, gps_x_k, gps_y_k = _read_gps_alt(JSONL_KNOWN)
+all_gps_alt = np.concatenate([gps_alt_t, gps_alt_k])
+all_gps_x = np.concatenate([gps_x_t, gps_x_k])
+all_gps_y = np.concatenate([gps_y_t, gps_y_k])
+
+dem_at_gps = _dem_at_xy(all_gps_x, all_gps_y)
+DEM_OFFSET = float(np.median(all_gps_alt) - np.median(dem_at_gps))
+elev_s = elev_s + DEM_OFFSET  # kalibriran DEM
+print(
+    f"DEM kalibracija: offset={DEM_OFFSET:+.1f}m  "
+    f"(DEM median={np.median(dem_at_gps)-DEM_OFFSET:.1f}m → GPS median={np.median(all_gps_alt):.1f}m)"
+)
+print(f"Elevacija (kalibrirano): {elev_s.min():.1f}-{elev_s.max():.1f}m")
 
 # UGV telemetrija: antena je ~0.5m iznad tla, vizualni offset 1.5m
 GPS_HEIGHT = 0.5  # m — visina UGV antene iznad tla
@@ -100,18 +144,8 @@ ROUTE_Z_OFFSET = 1.5  # m — vizualni razmak rute iznad terena u 3D sceni
 
 
 def snap_to_terrain(xs, ys):
-    """Interpolira visinu terena u (x, y) i vraca z = teren + GPS_HEIGHT + ROUTE_Z_OFFSET.
-
-    Ruta se uvijek drzi iznad terena, bez 'tunel' efekta koji nastaje kad
-    GPS altitude (WGS84 elipsoid) ne odgovara DEM modelu.
-    """
-    from scipy.ndimage import map_coordinates
-
-    col = (np.array(xs) - x_m[0]) / (x_m[-1] - x_m[0]) * (GRID_N - 1)
-    row = (np.array(ys) - y_m[0]) / (y_m[-1] - y_m[0]) * (GRID_N - 1)
-    col = np.clip(col, 0, GRID_N - 1)
-    row = np.clip(row, 0, GRID_N - 1)
-    terrain_z = map_coordinates(elev_s, [row, col], order=1, mode="nearest")
+    """Interpolira kalibriranu visinu terena i vraca z = teren + GPS_HEIGHT + ROUTE_Z_OFFSET."""
+    terrain_z = _dem_at_xy(xs, ys)
     return (terrain_z + GPS_HEIGHT + ROUTE_Z_OFFSET).tolist()
 
 
