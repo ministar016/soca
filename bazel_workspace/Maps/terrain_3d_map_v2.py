@@ -225,11 +225,11 @@ print(f"Elevacija (kalibrirano): {elev_s.min():.1f}-{elev_s.max():.1f}m")
 
 # UGV telemetrija: antena je ~0.5m iznad tla, vizualni offset 1.5m
 GPS_HEIGHT = 0.5  # m — visina UGV antene iznad tla
-ROUTE_Z_OFFSET = 1.5  # m — vizualni razmak rute iznad terena u 3D sceni
+ROUTE_Z_OFFSET = 0.0  # m — ruta je tacno GPS_HEIGHT iznad terena (0.5m)
 
 
 def snap_to_terrain(xs, ys):
-    """Interpolira kalibriranu visinu terena i vraca z = teren + GPS_HEIGHT + ROUTE_Z_OFFSET."""
+    """Interpolira kalibriranu visinu terena i vraca z = teren + GPS_HEIGHT."""
     terrain_z = _dem_at_xy(xs, ys)
     return (terrain_z + GPS_HEIGHT + ROUTE_Z_OFFSET).tolist()
 
@@ -643,24 +643,27 @@ fig.update_layout(
             font=dict(color="white", size=12),
             buttons=[
                 dict(
-                    label="Satelitski Layer",
+                    label="Satelitski",
                     method="update",
                     args=[
                         {"visible": [False, True, True, True, True, True, True, True]}
                     ],
                 ),
                 dict(
-                    label="Traversability Layer",
+                    label="Hybrid",
                     method="update",
                     args=[
-                        {"visible": [True, False, True, True, True, True, True, True]}
+                        {
+                            "visible": [True, True, True, True, True, True, True, True],
+                            "opacity": [0.55, 0.80, 1, 1, 1, 1, 1, 1],
+                        }
                     ],
                 ),
                 dict(
-                    label="Oba Layera",
+                    label="Topografija",
                     method="update",
                     args=[
-                        {"visible": [True, True, True, True, True, True, True, True]}
+                        {"visible": [True, False, True, True, True, True, True, True]}
                     ],
                 ),
             ],
