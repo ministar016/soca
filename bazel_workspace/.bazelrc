@@ -12,4 +12,4 @@ build --python_version=PY3
 build --jobs=8
 
 # Cache
-build --disk_cache=~/.cache/bazel
+build --disk_cache=~/.cache/bazel_disk_cache
