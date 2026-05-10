@@ -94,6 +94,26 @@ x_m = (lons - LON_CENTER) * 111320 * np.cos(np.radians(LAT_CENTER))
 y_m = (lats - LAT_CENTER) * 111320
 XX, YY = np.meshgrid(x_m, y_m)
 
+# UGV telemetrija: antena je ~0.5m iznad tla, vizualni offset 1.5m
+GPS_HEIGHT = 0.5  # m — visina UGV antene iznad tla
+ROUTE_Z_OFFSET = 1.5  # m — vizualni razmak rute iznad terena u 3D sceni
+
+
+def snap_to_terrain(xs, ys):
+    """Interpolira visinu terena u (x, y) i vraca z = teren + GPS_HEIGHT + ROUTE_Z_OFFSET.
+
+    Ruta se uvijek drzi iznad terena, bez 'tunel' efekta koji nastaje kad
+    GPS altitude (WGS84 elipsoid) ne odgovara DEM modelu.
+    """
+    from scipy.ndimage import map_coordinates
+
+    col = (np.array(xs) - x_m[0]) / (x_m[-1] - x_m[0]) * (GRID_N - 1)
+    row = (np.array(ys) - y_m[0]) / (y_m[-1] - y_m[0]) * (GRID_N - 1)
+    col = np.clip(col, 0, GRID_N - 1)
+    row = np.clip(row, 0, GRID_N - 1)
+    terrain_z = map_coordinates(elev_s, [row, col], order=1, mode="nearest")
+    return (terrain_z + GPS_HEIGHT + ROUTE_Z_OFFSET).tolist()
+
 
 # ── 2. Traversability mapa ───────────────────────────────────────────────────
 def compute_traversability(img_path):
@@ -227,7 +247,8 @@ route_x, route_y, route_z, route_spd, route_dist, route_ts = load_trust_route(
 STEP = 5
 rx = route_x[::STEP]
 ry = route_y[::STEP]
-rz = [z + 2.5 for z in route_z[::STEP]]
+# Snapujemo na teren umjesto GPS altitude (izbjegava WGS84-vs-DEM razliku)
+rz = snap_to_terrain(rx, ry)
 rs = route_spd[::STEP]
 rd = route_dist[::STEP]
 rt = route_ts[::STEP]
@@ -240,7 +261,8 @@ kroute_x, kroute_y, kroute_z, kroute_spd, kroute_dist, kroute_ts = load_trust_ro
 KSTEP = 8  # veca ruta, veci korak
 krx = kroute_x[::KSTEP]
 kry = kroute_y[::KSTEP]
-krz = [z + 2.5 for z in kroute_z[::KSTEP]]
+# Snapujemo na teren — UGV ruta ne prolazi kroz zemlju
+krz = snap_to_terrain(krx, kry)
 krs = kroute_spd[::KSTEP]
 krd = kroute_dist[::KSTEP]
 krt = kroute_ts[::KSTEP]
@@ -331,7 +353,7 @@ surf_trav = go.Surface(
     opacity=0.88,
     lighting=dict(ambient=0.75, diffuse=0.5, specular=0.05),
     name="Traversability",
-    visible=True,
+    visible=False,
     showscale=True,
 )
 
@@ -351,7 +373,7 @@ surf_sat = go.Surface(
     opacity=0.90,
     lighting=dict(ambient=0.85, diffuse=0.6, specular=0.1),
     name="Satelitska (elevation)",
-    visible=False,
+    visible=True,
     showscale=False,
 )
 
@@ -502,17 +524,17 @@ fig.update_layout(
             font=dict(color="white", size=12),
             buttons=[
                 dict(
-                    label="Traversability Layer",
-                    method="update",
-                    args=[
-                        {"visible": [True, False, True, True, True, True, True, True]}
-                    ],
-                ),
-                dict(
                     label="Satelitski Layer",
                     method="update",
                     args=[
                         {"visible": [False, True, True, True, True, True, True, True]}
+                    ],
+                ),
+                dict(
+                    label="Traversability Layer",
+                    method="update",
+                    args=[
+                        {"visible": [True, False, True, True, True, True, True, True]}
                     ],
                 ),
                 dict(
