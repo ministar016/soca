@@ -1,7 +1,6 @@
-"""
-3D Terrain Navigation Map  v3
+"""3D Terrain Navigation Map  v3
 Koordinate: 48.2295, 11.6219 (München okolica, prosirena mapa)
-- Visinski podaci: Open Elevation API (60x60 grid, kesiran)
+- Visinski podaci: OpenTopography Copernicus DEM 30m (COP30, kesiran)
 - Layer 1: Traversability overlay (HSV segmentacija image.png)
 - Layer 2: Satelitska tekstura (ESRI World Imagery)
 - A* putanja: automatski izracunata (cyan)
@@ -27,6 +26,19 @@ JSONL_KNOWN = os.path.join(MAPS_DIR, "10.9.0.50_2026-05-08_09-51-50_UTC.jsonl")
 OUT_HTML = os.path.join(MAPS_DIR, "terrain_3d_result.html")
 OUT_PNG = os.path.join(MAPS_DIR, "terrain_3d_result.png")
 
+# OpenTopography API kljuc — registracija besplatna na https://portal.opentopography.org
+# Ucitava se iz Maps/api_key fajla (format: "API key: <kljuc>"), env var OT_API_KEY,
+# ili se moze direktno postaviti ovdje.
+_api_key_file = os.path.join(MAPS_DIR, "api_key")
+OT_API_KEY = ""
+if os.path.exists(_api_key_file):
+    with open(_api_key_file) as _f:
+        for _line in _f:
+            if ":" in _line:
+                OT_API_KEY = _line.split(":", 1)[1].strip()
+                break
+OT_API_KEY = OT_API_KEY or os.environ.get("OT_API_KEY", "")
+
 # Prosireni bounds koji pokrivaju obje rute
 # Ruta 1: 16m x 34m oko E0/N0
 # Ruta 2: 254m x 382m, ide daleko na jug i istok
@@ -43,6 +55,32 @@ UTM_N0 = 5345502.56
 
 
 # ── 1. Elevacijski grid (kesirano) ──────────────────────────────────────────
+def _parse_aaigrid(text):
+    """Parsira ASCII Grid (AAIGrid) format koji vraca OpenTopography API."""
+    lines = text.strip().splitlines()
+    header = {}
+    data_start = 0
+    for i, line in enumerate(lines):
+        parts = line.strip().split()
+        if len(parts) == 2 and not parts[0].lstrip("-").replace(".", "").isdigit():
+            header[parts[0].lower()] = float(parts[1])
+            data_start = i + 1
+        else:
+            data_start = i
+            break
+    ncols = int(header["ncols"])
+    nrows = int(header["nrows"])
+    nodata = header.get("nodata_value", -9999.0)
+    vals = []
+    for line in lines[data_start:]:
+        if line.strip():
+            vals.extend(float(x) for x in line.split())
+    arr = np.array(vals, dtype=float).reshape(nrows, ncols)
+    arr[arr == nodata] = np.nan
+    # OpenTopography vraca redove od sjevera prema jugu — flipujemo za linspace(south→north)
+    return np.flipud(arr)
+
+
 def fetch_elevation_grid():
     lats = np.linspace(LAT_CENTER - LAT_SPAN / 2, LAT_CENTER + LAT_SPAN / 2, GRID_N)
     lons = np.linspace(LON_CENTER - LON_SPAN / 2, LON_CENTER + LON_SPAN / 2, GRID_N)
@@ -54,29 +92,76 @@ def fetch_elevation_grid():
             d = json.load(f)
         return np.array(d["lats"]), np.array(d["lons"]), np.array(d["elev"])
 
-    print(f"Preuzimam {GRID_N*GRID_N} visinskih tocaka...")
-    locations = [
-        {"latitude": round(float(la), 6), "longitude": round(float(lo), 6)}
-        for la in lats
-        for lo in lons
-    ]
-    elev_flat = []
-    for i in range(0, len(locations), 256):
-        for attempt in range(3):
-            try:
-                r = requests.post(
-                    "https://api.open-elevation.com/api/v1/lookup",
-                    json={"locations": locations[i : i + 256]},
-                    timeout=30,
-                )
-                elev_flat.extend([x["elevation"] for x in r.json()["results"]])
-                print(f"  {len(elev_flat)}/{GRID_N*GRID_N}")
-                break
-            except Exception as e:
-                print(f"  Retry: {e}")
-                time.sleep(2)
+    api_key = OT_API_KEY or os.environ.get("OT_API_KEY", "")
+    south = LAT_CENTER - LAT_SPAN / 2
+    north = LAT_CENTER + LAT_SPAN / 2
+    west = LON_CENTER - LON_SPAN / 2
+    east = LON_CENTER + LON_SPAN / 2
 
-    elev = np.array(elev_flat).reshape(GRID_N, GRID_N)
+    elev = None
+
+    # ── Primarni izvor: OpenTopography Copernicus DEM 30m (COP30) ──
+    if api_key:
+        print("Preuzimam Copernicus DEM 30m (OpenTopography COP30)...")
+        params = {
+            "demtype": "COP30",
+            "south": south,
+            "north": north,
+            "west": west,
+            "east": east,
+            "outputFormat": "AAIGrid",
+            "API_Key": api_key,
+        }
+        try:
+            r = requests.get(
+                "https://portal.opentopography.org/API/globaldem",
+                params=params,
+                timeout=60,
+            )
+            if r.status_code == 200 and "ncols" in r.text[:200]:
+                raw = _parse_aaigrid(r.text)
+                # Upsample/downsample na GRID_N x GRID_N uz scipy zoom
+                from scipy.ndimage import zoom as nd_zoom
+
+                zy = GRID_N / raw.shape[0]
+                zx = GRID_N / raw.shape[1]
+                elev = nd_zoom(raw, (zy, zx), order=1)
+                print(
+                    f"  COP30 preuzet ({raw.shape[1]}x{raw.shape[0]} → {GRID_N}x{GRID_N})"
+                )
+            else:
+                print(f"  OpenTopography greska {r.status_code}: {r.text[:120]}")
+        except Exception as e:
+            print(f"  OpenTopography greska: {e}")
+    else:
+        print("OT_API_KEY nije postavljen — koristim Open Elevation fallback.")
+        print("  Registracija kljuca: https://portal.opentopography.org/requestApiKey")
+
+    # ── Fallback: Open Elevation API (batch POST) ──
+    if elev is None:
+        print(f"Preuzimam {GRID_N*GRID_N} visinskih tocaka (Open Elevation)...")
+        locations = [
+            {"latitude": round(float(la), 6), "longitude": round(float(lo), 6)}
+            for la in lats
+            for lo in lons
+        ]
+        elev_flat = []
+        for i in range(0, len(locations), 256):
+            for attempt in range(3):
+                try:
+                    r = requests.post(
+                        "https://api.open-elevation.com/api/v1/lookup",
+                        json={"locations": locations[i : i + 256]},
+                        timeout=30,
+                    )
+                    elev_flat.extend([x["elevation"] for x in r.json()["results"]])
+                    print(f"  {len(elev_flat)}/{GRID_N*GRID_N}")
+                    break
+                except Exception as e:
+                    print(f"  Retry: {e}")
+                    time.sleep(2)
+        elev = np.array(elev_flat, dtype=float).reshape(GRID_N, GRID_N)
+
     with open(cache_path, "w") as f:
         json.dump(
             {"lats": lats.tolist(), "lons": lons.tolist(), "elev": elev.tolist()}, f
