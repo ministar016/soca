@@ -256,62 +256,83 @@ cost_map = compute_traversability(IMG_PATH)
 
 # ── 3. Preuzimanje satelitske tile slike ─────────────────────────────────────
 def fetch_satellite_tile():
-    """Preuzima ESRI World Imagery tile kao PNG i vraca base64 string."""
-    cache_sat = os.path.join(MAPS_DIR, "satellite_tile.png")
-    if os.path.exists(cache_sat):
-        print("Koristim kesiranu satelitsku sliku...")
-        with open(cache_sat, "rb") as f:
-            return base64.b64encode(f.read()).decode()
+    """Preuzima ESRI World Imagery tile (1024px), projektuje na GRID_N x GRID_N.
 
-    print("Preuzimam satelitsku sliku (ESRI WMS)...")
-    # ESRI World Imagery WMS - javno dostupan bez API kljuca
+    Vraca:
+        sat_surf_color  -- 2D float array (GRID_N x GRID_N) za surfacecolor
+        sat_colorscale  -- lista [value, 'rgb(R,G,B)'] za pravo RGB teksturiranje
+        sat_b64         -- base64 PNG thumbnail za inset
+    """
+    cache_sat = os.path.join(MAPS_DIR, "satellite_tile.png")
     lat_min = LAT_CENTER - LAT_SPAN / 2
     lat_max = LAT_CENTER + LAT_SPAN / 2
     lon_min = LON_CENTER - LON_SPAN / 2
     lon_max = LON_CENTER + LON_SPAN / 2
-    url = (
-        "https://services.arcgisonline.com/arcgis/rest/services/"
-        "World_Imagery/MapServer/export"
-        f"?bbox={lon_min},{lat_min},{lon_max},{lat_max}"
-        "&bboxSR=4326&imageSR=4326"
-        "&size=512,512&format=png&f=image"
+
+    if not os.path.exists(cache_sat):
+        print("Preuzimam satelitsku sliku (ESRI World Imagery 1024px)...")
+        url = (
+            "https://services.arcgisonline.com/arcgis/rest/services/"
+            "World_Imagery/MapServer/export"
+            f"?bbox={lon_min},{lat_min},{lon_max},{lat_max}"
+            "&bboxSR=4326&imageSR=4326"
+            "&size=1024,1024&format=png&f=image"
+        )
+        try:
+            r = requests.get(url, timeout=40)
+            if r.status_code == 200 and len(r.content) > 10000:
+                with open(cache_sat, "wb") as f:
+                    f.write(r.content)
+                print(f"  Satelitska slika preuzeta ({len(r.content)//1024}KB)")
+            else:
+                print(f"  ESRI greska {r.status_code} ({len(r.content)} B)")
+        except Exception as e:
+            print(f"  ESRI greska: {e}")
+
+    if not os.path.exists(cache_sat):
+        print("  Nema satelitske slike — preskacam.")
+        return None, None, None
+
+    img_bgr = cv2.imread(cache_sat)
+    if img_bgr is None:
+        return None, None, None
+
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    # ESRI vraca sliku s nizom od sjevera prema jugu (y=0 je sjever).
+    # Nas linspace ide od juga prema sjeveru → flipujemo vertikalno.
+    img_rgb = np.flipud(img_rgb)
+    img_sm = cv2.resize(img_rgb, (GRID_N, GRID_N), interpolation=cv2.INTER_AREA)
+
+    # Kvantizujemo na max 256 boja — colorscale ostaje mali, HTML brzi
+    from PIL import Image
+
+    pil_img = Image.fromarray(img_sm).quantize(
+        colors=256, method=Image.Quantize.MEDIANCUT
     )
-    try:
-        r = requests.get(url, timeout=20)
-        if r.status_code == 200 and len(r.content) > 5000:
-            with open(cache_sat, "wb") as f:
-                f.write(r.content)
-            print(f"  Satelitska slika preuzeta ({len(r.content)//1024}KB)")
-            return base64.b64encode(r.content).decode()
-        else:
-            print(f"  WMS greska {r.status_code}, koristim OSM fallback...")
-    except Exception as e:
-        print(f"  Greska: {e}")
+    idx_img = np.array(pil_img)  # (GRID_N, GRID_N), indeksi 0..255
+    n_colors = int(idx_img.max()) + 1
+    sat_surf_color = idx_img.astype(float) / max(n_colors - 1, 1)
 
-    # OpenStreetMap tile fallback
-    import math
+    # Colorscale: max 256 unosa umjesto 3600
+    palette = np.array(pil_img.getpalette()).reshape(-1, 3)[:n_colors]
+    sat_colorscale = [
+        [
+            round(i / max(n_colors - 1, 1), 6),
+            f"rgb({palette[i,0]},{palette[i,1]},{palette[i,2]})",
+        ]
+        for i in range(n_colors)
+    ]
 
-    zoom = 16
-    lat_r = math.radians(LAT_CENTER)
-    x_tile = int((LON_CENTER + 180) / 360 * 2**zoom)
-    y_tile = int(
-        (1 - math.log(math.tan(lat_r) + 1 / math.cos(lat_r)) / math.pi) / 2 * 2**zoom
+    with open(cache_sat, "rb") as f:
+        sat_b64 = base64.b64encode(f.read()).decode()
+
+    print(
+        f"  Satelitska tekstura pripremljena ({GRID_N}x{GRID_N}, {n_colors} boja → 3D surface)"
     )
-    osm_url = f"https://tile.openstreetmap.org/{zoom}/{x_tile}/{y_tile}.png"
-    headers = {"User-Agent": "SocaRobotMapper/1.0"}
-    try:
-        r2 = requests.get(osm_url, headers=headers, timeout=15)
-        if r2.status_code == 200:
-            with open(cache_sat, "wb") as f:
-                f.write(r2.content)
-            print("  OSM tile preuzet kao fallback")
-            return base64.b64encode(r2.content).decode()
-    except Exception as e2:
-        print(f"  OSM fallback greska: {e2}")
-    return None
+    return sat_surf_color, sat_colorscale, sat_b64
 
 
-sat_b64 = fetch_satellite_tile()
+sat_surf_color, sat_colorscale, sat_b64 = fetch_satellite_tile()
 
 
 # ── 4. JSONL GPS ruta (UTM → metre relativno od centra) ──────────────────────
@@ -477,24 +498,41 @@ surf_trav = go.Surface(
 )
 
 # ─ Surface: Satelitska projekcija layer ─
-# Mapiramo sliku kao uniformnu sivu povrsinu (bez teksture u Plotly 3D)
-# ali dodamo je kao pozadinsku annotation sliku u 2D projekciji na dno scene
-# i kao zasebni surface sa "earth" colorscale kao alternativa
-elevation_normalized = (elev_s - elev_s.min()) / max(elev_s.max() - elev_s.min(), 0.1)
-surf_sat = go.Surface(
-    x=XX,
-    y=YY,
-    z=elev_s,
-    surfacecolor=elevation_normalized,
-    colorscale="earth",
-    cmin=0,
-    cmax=1,
-    opacity=0.90,
-    lighting=dict(ambient=0.85, diffuse=0.6, specular=0.1),
-    name="Satelitska (elevation)",
-    visible=True,
-    showscale=False,
-)
+# Prava RGB tekstura iz satelitske slike mapirana na 3D teren
+if sat_surf_color is not None:
+    surf_sat = go.Surface(
+        x=XX,
+        y=YY,
+        z=elev_s,
+        surfacecolor=sat_surf_color,
+        colorscale=sat_colorscale,
+        cmin=0,
+        cmax=1,
+        opacity=0.95,
+        lighting=dict(ambient=0.92, diffuse=0.5, specular=0.02),
+        name="Satelitska (ESRI)",
+        visible=True,
+        showscale=False,
+    )
+else:
+    # Fallback: elevation-based earth colorscale
+    elevation_normalized = (elev_s - elev_s.min()) / max(
+        elev_s.max() - elev_s.min(), 0.1
+    )
+    surf_sat = go.Surface(
+        x=XX,
+        y=YY,
+        z=elev_s,
+        surfacecolor=elevation_normalized,
+        colorscale="earth",
+        cmin=0,
+        cmax=1,
+        opacity=0.90,
+        lighting=dict(ambient=0.85, diffuse=0.6, specular=0.1),
+        name="Satelitska (elevation fallback)",
+        visible=True,
+        showscale=False,
+    )
 
 traces = [surf_trav, surf_sat]
 
