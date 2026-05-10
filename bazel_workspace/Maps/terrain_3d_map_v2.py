@@ -39,19 +39,86 @@ if os.path.exists(_api_key_file):
                 break
 OT_API_KEY = OT_API_KEY or os.environ.get("OT_API_KEY", "")
 
-# Prosireni bounds koji pokrivaju obje rute
-# Ruta 1: 16m x 34m oko E0/N0
-# Ruta 2: 254m x 382m, ide daleko na jug i istok
-# Novi centar pomjeren da pokrije obje
-LAT_CENTER = 48.2295  # pomjereno ~170m juznije
-LON_CENTER = 11.6219  # pomjereno ~115m istocnije
-LAT_SPAN = 0.0065  # ~720m sjever-jug
-LON_SPAN = 0.0065  # ~480m istok-zapad
-GRID_N = 60  # veci grid za bolju rezoluciju
+GRID_N = 60       # grid rezolucija (celija po osi)
+_SAT_MARGIN = 1.5  # 50% margine oko GPS bounding boxa za satelitsku/DEM tile
 
-# UTM zona 32N referentna tocka (odgovara originalnom LAT/LON centru 48.2310367, 11.6203496)
-UTM_E0 = 694498.92
-UTM_N0 = 5345502.56
+
+# ── UTM Zone 32N ↔ WGS84 konverzija ─────────────────────────────────────────
+import math as _math
+
+def _utm32n_to_latlon(easting, northing):
+    """UTM Zone 32N (WGS84) → (lat_deg, lon_deg)."""
+    a = 6378137.0; f = 1 / 298.257223563
+    b = a * (1 - f); e2 = 1 - (b / a) ** 2; ep2 = (a / b) ** 2 - 1
+    k0 = 0.9996; E0 = 500000; lon0 = _math.radians(9)  # Zone 32N: meridian 9°E
+    x = easting - E0; y = northing
+    M = y / k0
+    mu = M / (a * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256))
+    e1 = (1 - _math.sqrt(1 - e2)) / (1 + _math.sqrt(1 - e2))
+    phi1 = (mu
+            + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * _math.sin(2 * mu)
+            + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * _math.sin(4 * mu)
+            + (151 * e1 ** 3 / 96) * _math.sin(6 * mu))
+    N1 = a / _math.sqrt(1 - e2 * _math.sin(phi1) ** 2)
+    T1 = _math.tan(phi1) ** 2; C1 = ep2 * _math.cos(phi1) ** 2
+    R1 = a * (1 - e2) / (1 - e2 * _math.sin(phi1) ** 2) ** 1.5
+    D = x / (N1 * k0)
+    lat = phi1 - (N1 * _math.tan(phi1) / R1) * (
+        D ** 2 / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 ** 2 - 9 * ep2) * D ** 4 / 24)
+    lon = lon0 + (D - (1 + 2 * T1 + C1) * D ** 3 / 6) / _math.cos(phi1)
+    return _math.degrees(lat), _math.degrees(lon)
+
+
+def _gps_bounds_from_jsonl(paths):
+    """Ucitaj sve JSONL putanje i vrati (e_min, e_max, n_min, n_max) u UTM."""
+    all_e, all_n = [], []
+    for path in paths:
+        if not os.path.exists(path):
+            continue
+        with open(path) as _f:
+            for _ln in _f:
+                try:
+                    p = json.loads(_ln.strip())["payload"]
+                    all_e.append(p["easting"])
+                    all_n.append(p["northing"])
+                except Exception:
+                    continue
+    if not all_e:
+        raise RuntimeError("Nije pronadjena ni jedna GPS tocka u JSONL fajlovima!")
+    return min(all_e), max(all_e), min(all_n), max(all_n)
+
+
+# ── Auto-compute map bounds iz GPS podataka ──────────────────────────────────
+_e_min, _e_max, _n_min, _n_max = _gps_bounds_from_jsonl([JSONL_TRUST, JSONL_KNOWN])
+UTM_E_CENTER = (_e_min + _e_max) / 2
+UTM_N_CENTER = (_n_min + _n_max) / 2
+LAT_CENTER, LON_CENTER = _utm32n_to_latlon(UTM_E_CENTER, UTM_N_CENTER)
+
+# Span = GPS bbox * SAT_MARGIN (margina za kontekst oko ruta)
+_cos_lat = _math.cos(_math.radians(LAT_CENTER))
+_lat_half = (_n_max - _n_min) / 2 / 111320 * _SAT_MARGIN
+_lon_half = (_e_max - _e_min) / 2 / (111320 * _cos_lat) * _SAT_MARGIN
+LAT_SPAN = round(_lat_half * 2, 5)
+LON_SPAN = round(_lon_half * 2, 5)
+
+print(f"Auto MAP centar: {LAT_CENTER:.6f}N, {LON_CENTER:.6f}E")
+print(f"Auto MAP span:   LAT={LAT_SPAN:.5f}° ({LAT_SPAN*111320:.0f}m)  "
+      f"LON={LON_SPAN:.5f}° ({LON_SPAN*111320*_cos_lat:.0f}m)")
+
+# ── Invalidiraj satelitski cache ako se centar promijenio ───────────────────
+_sat_meta_path = os.path.join(MAPS_DIR, "satellite_meta.json")
+_sat_cache_path = os.path.join(MAPS_DIR, "satellite_tile.png")
+_sat_meta = {"lat": round(LAT_CENTER, 6), "lon": round(LON_CENTER, 6),
+             "lat_span": LAT_SPAN, "lon_span": LON_SPAN}
+if os.path.exists(_sat_meta_path):
+    with open(_sat_meta_path) as _f:
+        _old_meta = json.load(_f)
+    if _old_meta != _sat_meta:
+        print("  Satelitski cache zastarjeo (centar se promijenio) — brišem...")
+        if os.path.exists(_sat_cache_path):
+            os.remove(_sat_cache_path)
+with open(_sat_meta_path, "w") as _f:
+    json.dump(_sat_meta, _f)
 
 
 # ── 1. Elevacijski grid (kesirano) ──────────────────────────────────────────
@@ -201,8 +268,8 @@ def _read_gps_alt(jsonl_path):
             try:
                 p = json.loads(line.strip())["payload"]
                 alts.append(p["altitude"])
-                xs.append(p["easting"] - UTM_E0)
-                ys.append(p["northing"] - UTM_N0)
+                xs.append(p["easting"] - UTM_E_CENTER)
+                ys.append(p["northing"] - UTM_N_CENTER)
             except Exception:
                 continue
     return np.array(alts), np.array(xs), np.array(ys)
@@ -254,14 +321,22 @@ def compute_traversability(img_path):
 cost_map = compute_traversability(IMG_PATH)
 
 
-def compute_trust_map(c_map, all_route_xs, all_route_ys):
+def compute_trust_map(c_map, route_specs):
     """
-    Generise trust mapu stupnja povjerenja terena:
+    Generise trust mapu stupnja povjerenja terena.
+
+    route_specs: lista rjecnika:
+      {'xs': [...], 'ys': [...], 'trust': float}
+        xs/ys   — x/y koordinate u metrima (relativno na centar mape)
+        trust   — nivo povjerenja koji ce biti dodijeljen pusjecenim celija:
+                  1.00 = UGV potvrdio (TRUST ruta)
+                  0.70 = ispitano ali nije vozeno (KNOWN ruta)
+
+    Bazni nivoi (iz cost_map):
       0.00 = voda/blokada (c_map > 0.88)
-      0.30 = prekinut put  (mali izolirani road fragment, nikad posjecen)
-      0.50 = suma/vegetacija (c_map 0.45–0.88)
+      0.30 = prekinut put  (mali izolirani road fragment)
+      0.50 = suma/vegetacija (c_map 0.45-0.88)
       0.70 = otvoreno zemljiste (c_map < 0.45)
-      1.00 = UGV vec prosao (~1m radius oko GPS tocaka)
     """
     from scipy.ndimage import label as nd_label, gaussian_filter as gf
 
@@ -275,16 +350,17 @@ def compute_trust_map(c_map, all_route_xs, all_route_ys):
     water_mask = c_map > 0.88
     trust[water_mask] = 0.00
 
-    # Putevi koji se prekidaju (mali izolirani road fragments, cost < 0.17) → 30 %
+    # Prekinuti putevi (mali road fragments, cost < 0.17) → 30 %
     road_mask = c_map < 0.17
     labeled, n_comp = nd_label(road_mask)
     for comp_id in range(1, n_comp + 1):
         if (labeled == comp_id).sum() < 5:
             trust[labeled == comp_id] = 0.30
 
-    # GPS posjecene lokacije → 100 % (buffer ±1 celija radi vidljivosti na gridu)
-    for xs, ys in zip(all_route_xs, all_route_ys):
-        for x, y in zip(xs, ys):
+    # GPS rute → nivo povjerenja prema specifikaciji (buffer ±1 celija)
+    for spec in route_specs:
+        t_level = float(spec["trust"])
+        for x, y in zip(spec["xs"], spec["ys"]):
             col = (float(x) - float(x_m[0])) / (float(x_m[-1]) - float(x_m[0])) * (GRID_N - 1)
             row = (float(y) - float(y_m[0])) / (float(y_m[-1]) - float(y_m[0])) * (GRID_N - 1)
             col_i = int(np.clip(round(col), 0, GRID_N - 1))
@@ -293,7 +369,9 @@ def compute_trust_map(c_map, all_route_xs, all_route_ys):
                 for dc in range(-1, 2):
                     nr, nc = row_i + dr, col_i + dc
                     if 0 <= nr < GRID_N and 0 <= nc < GRID_N:
-                        trust[nr, nc] = 1.00
+                        # Samo povecavaj trust, nikad ne smanjuj
+                        if t_level > trust[nr, nc]:
+                            trust[nr, nc] = t_level
 
     trust = gf(trust, sigma=0.5)
     trust[water_mask] = 0.00  # vodu ne zamagljujemo
@@ -408,9 +486,9 @@ def load_trust_route(jsonl_path):
             except Exception:
                 continue
 
-    # UTM → metri relativno od centra mape
-    route_x = [(r["e"] - UTM_E0) for r in rows]  # istok pozitivno
-    route_y = [(r["n"] - UTM_N0) for r in rows]  # sjever pozitivno
+    # UTM → metri relativno od centra mape (UTM_E_CENTER/N_CENTER auto-computed iz GPS)
+    route_x = [(r["e"] - UTM_E_CENTER) for r in rows]  # istok pozitivno
+    route_y = [(r["n"] - UTM_N_CENTER) for r in rows]  # sjever pozitivno
     route_z = [r["alt"] for r in rows]
     route_spd = [r["spd"] for r in rows]
     route_dist = [r["dist"] for r in rows]
@@ -429,16 +507,6 @@ route_x, route_y, route_z, route_spd, route_dist, route_ts = load_trust_route(
     JSONL_TRUST
 )
 
-# Koordinatni offset: UTM_E0/N0 odgovara starom centru mape (48.2310367, 11.6203496),
-# dok je LAT_CENTER/LON_CENTER pomjeren na (48.2295, 11.6219) da pokrije obje rute.
-# Svodimo sve rute na isti koordinatni sistem kao grid (x_m, y_m) relativno na LAT/LON centar,
-# inace se rute pojavljuju ~115m istocnije i ~17m juznije nego sto stvarno jesu.
-_ROUTE_DX = (11.6203496 - LON_CENTER) * 111320 * np.cos(np.radians(LAT_CENTER))  # ≈ -114.8m
-_ROUTE_DY = (48.2310367 - LAT_CENTER) * 111320  # ≈ +17.1m
-print(f"  Koordinatni offset ruta: dx={_ROUTE_DX:.1f}m  dy={_ROUTE_DY:.1f}m")
-route_x = [v + _ROUTE_DX for v in route_x]
-route_y = [v + _ROUTE_DY for v in route_y]
-
 # Downsample trust rute
 STEP = 5
 rx = route_x[::STEP]
@@ -454,8 +522,6 @@ print("")
 kroute_x, kroute_y, kroute_z, kroute_spd, kroute_dist, kroute_ts = load_trust_route(
     JSONL_KNOWN
 )
-kroute_x = [v + _ROUTE_DX for v in kroute_x]
-kroute_y = [v + _ROUTE_DY for v in kroute_y]
 KSTEP = 8  # veca ruta, veci korak
 krx = kroute_x[::KSTEP]
 kry = kroute_y[::KSTEP]
@@ -466,12 +532,15 @@ krd = kroute_dist[::KSTEP]
 krt = kroute_ts[::KSTEP]
 
 # ── Trust mapa (racuna se tek kad su obje rute ucitane) ──────────────────────
+# TRUST route (12-10-46): 100% — UGV svjedoci da je teren prohodan
+# KNOWN route (09-51-50):  70% — ispitano, nije direktno vozeno
 print("Racunam trust mapu...")
-trust_map = compute_trust_map(
-    cost_map, [route_x, kroute_x], [route_y, kroute_y]
-)
+trust_map = compute_trust_map(cost_map, [
+    {"xs": route_x,  "ys": route_y,  "trust": 1.00},  # TRUST: potvrdjena
+    {"xs": kroute_x, "ys": kroute_y, "trust": 0.70},  # KNOWN: ispitana
+])
 print(f"  Trust: min={trust_map.min():.2f}  max={trust_map.max():.2f}  "
-      f"GPS 100%: {(trust_map > 0.95).sum()} celija")
+      f"GPS 100% celija: {(trust_map > 0.95).sum()}  GPS 70%+ celija: {(trust_map >= 0.68).sum()}")
 
 
 # ── 5. A* path planning ──────────────────────────────────────────────────────
@@ -1328,4 +1397,84 @@ plt.tight_layout()
 plt.savefig(OUT_PNG, dpi=150, bbox_inches="tight", facecolor="#08080e")
 plt.close(fig2)
 print(f"Statican PNG: {OUT_PNG}")
+
+# ── 8. Trust DB (JSON) ───────────────────────────────────────────────────────
+# Baza povjerenja koja se moze azurirati putem API-ja ili JSON fajlova.
+# Schema:
+#   schema_version  — int, povecava se pri lomljivim promjenama strukture
+#   generated_at    — ISO 8601 UTC timestamp
+#   area            — centar i raspon mape u GPS + UTM koordinatama
+#   sessions        — lista ucitanih JSONL sesija sa nivoom povjerenja
+#   manual_zones    — rucno dodane zone (prazna lista, popunjava API/JSON)
+#   points          — sve GPS tocke sa UTM koordinatama i trust levelom
+import datetime as _dt
+
+_trust_db_path = os.path.join(MAPS_DIR, "trust_db.json")
+print("\nGenerisem trust_db.json...")
+
+_trust_sid = os.path.basename(JSONL_TRUST).replace(".jsonl", "")
+_known_sid = os.path.basename(JSONL_KNOWN).replace(".jsonl", "")
+
+_sessions = [
+    {
+        "id": _trust_sid,
+        "file": JSONL_TRUST,
+        "trust_level": 1.0,
+        "label": "TRUST ROUTE – UGV potvrdio prolaz",
+        "n_points": len(route_x),
+    },
+    {
+        "id": _known_sid,
+        "file": JSONL_KNOWN,
+        "trust_level": 0.70,
+        "label": "KNOWN ROUTE – ispitano, nije vozeno",
+        "n_points": len(kroute_x),
+    },
+]
+
+_points = []
+for _x, _y, _alt, _ts in zip(route_x, route_y, route_z, route_ts):
+    _points.append({
+        "easting":  round(float(_x) + UTM_E_CENTER, 3),
+        "northing": round(float(_y) + UTM_N_CENTER, 3),
+        "altitude": round(float(_alt), 2),
+        "trust":    1.0,
+        "session_id": _trust_sid,
+        "timestamp": _ts,
+    })
+for _x, _y, _alt, _ts in zip(kroute_x, kroute_y, kroute_z, kroute_ts):
+    _points.append({
+        "easting":  round(float(_x) + UTM_E_CENTER, 3),
+        "northing": round(float(_y) + UTM_N_CENTER, 3),
+        "altitude": round(float(_alt), 2),
+        "trust":    0.70,
+        "session_id": _known_sid,
+        "timestamp": _ts,
+    })
+
+_trust_db = {
+    "schema_version": 1,
+    "generated_at": _dt.datetime.utcnow().isoformat() + "Z",
+    "area": {
+        "lat_center":   round(LAT_CENTER, 7),
+        "lon_center":   round(LON_CENTER, 7),
+        "utm_e_center": round(UTM_E_CENTER, 2),
+        "utm_n_center": round(UTM_N_CENTER, 2),
+        "utm_zone":     "32N",
+        "lat_span":     LAT_SPAN,
+        "lon_span":     LON_SPAN,
+    },
+    "sessions": _sessions,
+    "manual_zones": [],
+    "points": _points,
+}
+
+with open(_trust_db_path, "w", encoding="utf-8") as _f:
+    json.dump(_trust_db, _f, ensure_ascii=False, indent=2)
+print(
+    f"  trust_db.json: {len(_points)} tocaka  "
+    f"({_sessions[0]['n_points']} TRUST 100% + {_sessions[1]['n_points']} KNOWN 70%)"
+)
+print(f"  Lokacija: {_trust_db_path}")
+
 print("\nGotovo!")
