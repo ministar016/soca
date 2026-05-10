@@ -153,6 +153,21 @@ def fetch_elevation_grid():
     lons = np.linspace(LON_CENTER - LON_SPAN / 2, LON_CENTER + LON_SPAN / 2, GRID_N)
 
     cache_path = os.path.join(MAPS_DIR, "elevation_cache.json")
+
+    # ── Cache invalidacija: brisi ako se centar/span promijenio ────────────
+    _elev_meta_path = os.path.join(MAPS_DIR, "elevation_meta.json")
+    _elev_meta_curr = {
+        "lat": round(LAT_CENTER, 6), "lon": round(LON_CENTER, 6),
+        "lat_span": LAT_SPAN, "lon_span": LON_SPAN,
+    }
+    if os.path.exists(_elev_meta_path):
+        with open(_elev_meta_path) as _mf:
+            _old_elev_meta = json.load(_mf)
+        if _old_elev_meta != _elev_meta_curr:
+            print("  Elevacijski cache zastarjeo (centar se promijenio) — brišem...")
+            if os.path.exists(cache_path):
+                os.remove(cache_path)
+
     if os.path.exists(cache_path):
         print("Koristim kesirane visinske podatke...")
         with open(cache_path) as f:
@@ -233,6 +248,8 @@ def fetch_elevation_grid():
         json.dump(
             {"lats": lats.tolist(), "lons": lons.tolist(), "elev": elev.tolist()}, f
         )
+    with open(_elev_meta_path, "w") as _mf:
+        json.dump(_elev_meta_curr, _mf)
     return lats, lons, elev
 
 
@@ -1393,7 +1410,7 @@ leg = ax.legend(
 )
 
 ax.view_init(elev=28, azim=-55)
-plt.tight_layout()
+# tight_layout ne radi dobro s 3D subplot-om — koristimo savefig direktno
 plt.savefig(OUT_PNG, dpi=150, bbox_inches="tight", facecolor="#08080e")
 plt.close(fig2)
 print(f"Statican PNG: {OUT_PNG}")
@@ -1454,7 +1471,7 @@ for _x, _y, _alt, _ts in zip(kroute_x, kroute_y, kroute_z, kroute_ts):
 
 _trust_db = {
     "schema_version": 1,
-    "generated_at": _dt.datetime.utcnow().isoformat() + "Z",
+    "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     "area": {
         "lat_center":   round(LAT_CENTER, 7),
         "lon_center":   round(LON_CENTER, 7),
