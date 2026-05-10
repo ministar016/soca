@@ -893,25 +893,32 @@ plot_div_html = fig.to_html(include_plotlyjs="cdn", full_html=False, div_id="plo
 if sat_b64:
     sat_panel_html = f"""  <div id="side-panel">
     <div class="panel-title">&#128225; Satelitska snimka 2D</div>
-    <div id="sat-container">
-      <img id="sat-img" src="data:image/png;base64,{sat_b64}" alt="Satelitska snimka"/>
-      <svg id="sat-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
-        <polyline points="{trust_svg_pts}" fill="none" stroke="gold" stroke-width="0.9"
-                  stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
-        <polyline points="{known_svg_pts}" fill="none" stroke="mediumpurple" stroke-width="0.9"
-                  stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
-        <line id="cur-h" x1="0" y1="50" x2="100" y2="50"
-              stroke="red" stroke-width="0.5" stroke-opacity="0.65"
-              vector-effect="non-scaling-stroke" style="display:none"/>
-        <line id="cur-v" x1="50" y1="0" x2="50" y2="100"
-              stroke="red" stroke-width="0.5" stroke-opacity="0.65"
-              vector-effect="non-scaling-stroke" style="display:none"/>
-        <circle id="cur-circle" cx="50" cy="50" r="2.5"
-                fill="none" stroke="red" stroke-width="0.9"
-                vector-effect="non-scaling-stroke" style="display:none"/>
-      </svg>
+    <div id="zoom-controls">
+      <button id="btn-zoom-reset" title="Reset zoom (R)">&#8635; Reset</button>
+      <button id="btn-follow" title="Auto-prati 3D kursor" class="active">&#128247; Prati</button>
+      <span id="zoom-lbl">1.0x</span>
     </div>
-    <div id="hover-info">Hover na 3D mapi za prikaz pozicije</div>
+    <div id="sat-container">
+      <div id="sat-inner">
+        <img id="sat-img" src="data:image/png;base64,{sat_b64}" alt="Satelitska snimka"/>
+        <svg id="sat-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
+          <polyline points="{trust_svg_pts}" fill="none" stroke="gold" stroke-width="0.9"
+                    stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
+          <polyline points="{known_svg_pts}" fill="none" stroke="mediumpurple" stroke-width="0.9"
+                    stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
+          <line id="cur-h" x1="0" y1="50" x2="100" y2="50"
+                stroke="red" stroke-width="0.5" stroke-opacity="0.65"
+                vector-effect="non-scaling-stroke" style="display:none"/>
+          <line id="cur-v" x1="50" y1="0" x2="50" y2="100"
+                stroke="red" stroke-width="0.5" stroke-opacity="0.65"
+                vector-effect="non-scaling-stroke" style="display:none"/>
+          <circle id="cur-circle" cx="50" cy="50" r="1.2"
+                  fill="none" stroke="red" stroke-width="0.7"
+                  vector-effect="non-scaling-stroke" style="display:none"/>
+        </svg>
+      </div>
+    </div>
+    <div id="hover-info">Scroll = zoom &bull; Drag = pan</div>
     <div id="legend">
       <div class="leg"><span class="leg-dot" style="background:gold"></span>TRUST ROUTE ({route_dist[-1]:.0f} m)</div>
       <div class="leg"><span class="leg-dot" style="background:mediumpurple"></span>KNOWN ROUTE ({kroute_dist[-1]:.0f} m)</div>
@@ -971,6 +978,14 @@ full_html = f"""<!DOCTYPE html>
       min-height: 280px;
       overflow: hidden;
       border: 1px solid rgba(255,255,255,0.15);
+      cursor: grab;
+    }}
+    #sat-inner {{
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      transform-origin: 0 0;
+      will-change: transform;
     }}
     #sat-img {{
       width: 100%;
@@ -978,6 +993,30 @@ full_html = f"""<!DOCTYPE html>
       display: block;
       object-fit: fill;
       image-rendering: crisp-edges;
+      user-select: none;
+      -webkit-user-drag: none;
+    }}
+    #zoom-controls {{
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-bottom: 6px;
+    }}
+    #zoom-controls button {{
+      background: rgba(255,255,255,0.08);
+      border: 1px solid rgba(255,255,255,0.18);
+      color: #ccc;
+      font-size: 11px;
+      padding: 3px 8px;
+      border-radius: 4px;
+      cursor: pointer;
+    }}
+    #zoom-controls button:hover {{ background: rgba(255,255,255,0.16); }}
+    #zoom-controls button.active {{ border-color: #1e90ff; color: #1e90ff; }}
+    #zoom-lbl {{
+      font-size: 11px;
+      color: #666;
+      margin-left: auto;
     }}
     #sat-overlay {{
       position: absolute;
@@ -1030,6 +1069,83 @@ full_html = f"""<!DOCTYPE html>
         }};
       }}
 
+      // ── 2D panel zoom / pan ──────────────────────────────────────────────
+      var zs = {{ z: 1, dx: 0, dy: 0, drag: false, lx: 0, ly: 0, follow: true }};
+      var satInner = document.getElementById('sat-inner');
+      var satCont  = document.getElementById('sat-container');
+      var zoomLbl  = document.getElementById('zoom-lbl');
+      var btnFollow = document.getElementById('btn-follow');
+
+      function clampPan() {{
+        var w = satCont.offsetWidth, h = satCont.offsetHeight;
+        zs.dx = Math.min(0, Math.max(-(zs.z - 1) * w, zs.dx));
+        zs.dy = Math.min(0, Math.max(-(zs.z - 1) * h, zs.dy));
+      }}
+
+      function applyTransform() {{
+        if (!satInner) return;
+        satInner.style.transform =
+          'translate(' + zs.dx + 'px,' + zs.dy + 'px) scale(' + zs.z + ')';
+        if (zoomLbl) zoomLbl.textContent = zs.z.toFixed(1) + 'x';
+      }}
+
+      function panToSVG(sx, sy) {{
+        if (!zs.follow || zs.z <= 1 || !satCont) return;
+        var w = satCont.offsetWidth, h = satCont.offsetHeight;
+        zs.dx = w / 2 - (sx / 100) * w * zs.z;
+        zs.dy = h / 2 - (sy / 100) * h * zs.z;
+        clampPan();
+        applyTransform();
+      }}
+
+      if (satCont) {{
+        satCont.addEventListener('wheel', function(e) {{
+          e.preventDefault();
+          var rect = satCont.getBoundingClientRect();
+          var mx = e.clientX - rect.left, my = e.clientY - rect.top;
+          var factor = e.deltaY < 0 ? 1.3 : 1 / 1.3;
+          var newZ = Math.max(1, Math.min(8, zs.z * factor));
+          zs.dx = mx - (mx - zs.dx) * (newZ / zs.z);
+          zs.dy = my - (my - zs.dy) * (newZ / zs.z);
+          zs.z  = newZ;
+          clampPan();
+          applyTransform();
+        }}, {{ passive: false }});
+
+        satCont.addEventListener('mousedown', function(e) {{
+          if (e.button !== 0) return;
+          zs.drag = true; zs.lx = e.clientX; zs.ly = e.clientY;
+          satCont.style.cursor = 'grabbing';
+          e.preventDefault();
+        }});
+        window.addEventListener('mousemove', function(e) {{
+          if (!zs.drag) return;
+          zs.dx += e.clientX - zs.lx; zs.dy += e.clientY - zs.ly;
+          zs.lx = e.clientX; zs.ly = e.clientY;
+          clampPan(); applyTransform();
+        }});
+        window.addEventListener('mouseup', function() {{
+          if (zs.drag) {{ zs.drag = false; satCont.style.cursor = 'grab'; }}
+        }});
+      }}
+
+      var btnReset = document.getElementById('btn-zoom-reset');
+      if (btnReset) btnReset.addEventListener('click', function() {{
+        zs.z = 1; zs.dx = 0; zs.dy = 0; applyTransform();
+      }});
+
+      if (btnFollow) btnFollow.addEventListener('click', function() {{
+        zs.follow = !zs.follow;
+        btnFollow.classList.toggle('active', zs.follow);
+      }});
+
+      window.addEventListener('keydown', function(e) {{
+        if (e.key === 'r' || e.key === 'R') {{
+          zs.z = 1; zs.dx = 0; zs.dy = 0; applyTransform();
+        }}
+      }});
+
+      // ── 3D hover → cursor + auto-pan ────────────────────────────────────
       function attachHover() {{
         var plotDiv = document.getElementById('plotly-3d');
         if (!plotDiv || typeof plotDiv.on !== 'function') {{
@@ -1040,19 +1156,20 @@ full_html = f"""<!DOCTYPE html>
         var curH      = document.getElementById('cur-h');
         var curV      = document.getElementById('cur-v');
         var hoverInfo = document.getElementById('hover-info');
-        if (!curCircle) return;
 
         plotDiv.on('plotly_hover', function (ev) {{
           if (!ev.points || !ev.points[0]) return;
           var pt = ev.points[0];
           var p  = worldToSVG(pt.x, pt.y);
 
-          curCircle.setAttribute('cx', p.sx); curCircle.setAttribute('cy', p.sy);
-          curH.setAttribute('y1', p.sy);      curH.setAttribute('y2', p.sy);
-          curV.setAttribute('x1', p.sx);      curV.setAttribute('x2', p.sx);
-          curCircle.style.display = '';
-          curH.style.display      = '';
-          curV.style.display      = '';
+          if (curCircle) {{
+            curCircle.setAttribute('cx', p.sx); curCircle.setAttribute('cy', p.sy);
+            curCircle.style.display = '';
+          }}
+          if (curH) {{ curH.setAttribute('y1', p.sy); curH.setAttribute('y2', p.sy); curH.style.display = ''; }}
+          if (curV) {{ curV.setAttribute('x1', p.sx); curV.setAttribute('x2', p.sx); curV.style.display = ''; }}
+
+          panToSVG(p.sx, p.sy);
 
           if (hoverInfo) hoverInfo.innerHTML =
             '<b style="color:#fff">Pozicija:</b><br>' +
@@ -1064,7 +1181,7 @@ full_html = f"""<!DOCTYPE html>
           if (curCircle) curCircle.style.display = 'none';
           if (curH)      curH.style.display      = 'none';
           if (curV)      curV.style.display      = 'none';
-          if (hoverInfo) hoverInfo.textContent    = 'Hover na 3D mapi za prikaz pozicije';
+          if (hoverInfo) hoverInfo.innerHTML = 'Scroll = zoom &bull; Drag = pan &bull; R = reset';
         }});
       }}
 
