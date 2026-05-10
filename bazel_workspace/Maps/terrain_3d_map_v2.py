@@ -254,6 +254,52 @@ def compute_traversability(img_path):
 cost_map = compute_traversability(IMG_PATH)
 
 
+def compute_trust_map(c_map, all_route_xs, all_route_ys):
+    """
+    Generise trust mapu stupnja povjerenja terena:
+      0.00 = voda/blokada (c_map > 0.88)
+      0.30 = prekinut put  (mali izolirani road fragment, nikad posjecen)
+      0.50 = suma/vegetacija (c_map 0.45–0.88)
+      0.70 = otvoreno zemljiste (c_map < 0.45)
+      1.00 = UGV vec prosao (~1m radius oko GPS tocaka)
+    """
+    from scipy.ndimage import label as nd_label, gaussian_filter as gf
+
+    trust = np.full((GRID_N, GRID_N), 0.70, dtype=float)
+
+    # Vegetacija / suma → 50 %
+    veg_mask = (c_map >= 0.45) & (c_map <= 0.88)
+    trust[veg_mask] = 0.50
+
+    # Voda / blokada → 0 %
+    water_mask = c_map > 0.88
+    trust[water_mask] = 0.00
+
+    # Putevi koji se prekidaju (mali izolirani road fragments, cost < 0.17) → 30 %
+    road_mask = c_map < 0.17
+    labeled, n_comp = nd_label(road_mask)
+    for comp_id in range(1, n_comp + 1):
+        if (labeled == comp_id).sum() < 5:
+            trust[labeled == comp_id] = 0.30
+
+    # GPS posjecene lokacije → 100 % (buffer ±1 celija radi vidljivosti na gridu)
+    for xs, ys in zip(all_route_xs, all_route_ys):
+        for x, y in zip(xs, ys):
+            col = (float(x) - float(x_m[0])) / (float(x_m[-1]) - float(x_m[0])) * (GRID_N - 1)
+            row = (float(y) - float(y_m[0])) / (float(y_m[-1]) - float(y_m[0])) * (GRID_N - 1)
+            col_i = int(np.clip(round(col), 0, GRID_N - 1))
+            row_i = int(np.clip(round(row), 0, GRID_N - 1))
+            for dr in range(-1, 2):
+                for dc in range(-1, 2):
+                    nr, nc = row_i + dr, col_i + dc
+                    if 0 <= nr < GRID_N and 0 <= nc < GRID_N:
+                        trust[nr, nc] = 1.00
+
+    trust = gf(trust, sigma=0.5)
+    trust[water_mask] = 0.00  # vodu ne zamagljujemo
+    return np.clip(trust, 0.0, 1.0)
+
+
 # ── 3. Preuzimanje satelitske tile slike ─────────────────────────────────────
 def fetch_satellite_tile():
     """Preuzima ESRI World Imagery tile (1024px), projektuje na GRID_N x GRID_N.
@@ -407,6 +453,14 @@ krs = kroute_spd[::KSTEP]
 krd = kroute_dist[::KSTEP]
 krt = kroute_ts[::KSTEP]
 
+# ── Trust mapa (racuna se tek kad su obje rute ucitane) ──────────────────────
+print("Racunam trust mapu...")
+trust_map = compute_trust_map(
+    cost_map, [route_x, kroute_x], [route_y, kroute_y]
+)
+print(f"  Trust: min={trust_map.min():.2f}  max={trust_map.max():.2f}  "
+      f"GPS 100%: {(trust_map > 0.95).sum()} celija")
+
 
 # ── 5. A* path planning ──────────────────────────────────────────────────────
 def astar(cost_map, elev, start, goal):
@@ -535,6 +589,38 @@ else:
     )
 
 traces = [surf_trav, surf_sat]
+
+# ─ Surface: Trusted Area layer ─
+colorscale_trust = [
+    [0.00, "rgb(0,0,180)"],    # voda / blokirano
+    [0.30, "rgb(255,80,0)"],   # prekinut put
+    [0.50, "rgb(200,180,0)"],  # suma / vegetacija
+    [0.70, "rgb(100,220,0)"],  # otvoreno zemljiste
+    [1.00, "rgb(0,255,50)"],   # UGV vec prosao
+]
+surf_trust = go.Surface(
+    x=XX,
+    y=YY,
+    z=elev_s,
+    surfacecolor=trust_map,
+    colorscale=colorscale_trust,
+    cmin=0,
+    cmax=1,
+    opacity=0.70,
+    lighting=dict(ambient=0.85, diffuse=0.5, specular=0.02),
+    name="Trusted Area",
+    visible=False,
+    showscale=True,
+    colorbar=dict(
+        title="Trust %",
+        tickvals=[0.0, 0.30, 0.50, 0.70, 1.0],
+        ticktext=["0% Blokada", "30% Put?", "50% Šuma", "70% Otvoreno", "100% UGV"],
+        len=0.50,
+        x=0.88,
+    ),
+)
+
+traces = [surf_trav, surf_sat, surf_trust]
 
 # ─ A* putanja ─
 if path:
@@ -684,7 +770,7 @@ fig.update_layout(
                     label="Satelitski",
                     method="update",
                     args=[
-                        {"visible": [False, True, True, True, True, True, True, True]}
+                        {"visible": [False, True, False, True, True, True, True, True, True]}
                     ],
                 ),
                 dict(
@@ -692,8 +778,8 @@ fig.update_layout(
                     method="update",
                     args=[
                         {
-                            "visible": [True, True, True, True, True, True, True, True],
-                            "opacity": [0.55, 0.80, 1, 1, 1, 1, 1, 1],
+                            "visible": [True, True, False, True, True, True, True, True, True],
+                            "opacity": [0.55, 0.80, 0.70, 1, 1, 1, 1, 1, 1],
                         }
                     ],
                 ),
@@ -701,7 +787,14 @@ fig.update_layout(
                     label="Topografija",
                     method="update",
                     args=[
-                        {"visible": [True, False, True, True, True, True, True, True]}
+                        {"visible": [True, False, False, True, True, True, True, True, True]}
+                    ],
+                ),
+                dict(
+                    label="Trusted Area",
+                    method="update",
+                    args=[
+                        {"visible": [False, True, True, True, True, True, True, True, True]}
                     ],
                 ),
             ],
@@ -757,47 +850,214 @@ fig.update_layout(
     height=800,
 )
 
-# Satelitsku sliku dodaj kao pozadinsku sliku (2D layout image u donjem lijevom uglu)
-if sat_b64:
-    lat_min = LAT_CENTER - LAT_SPAN / 2
-    lat_max = LAT_CENTER + LAT_SPAN / 2
-    lon_min = LON_CENTER - LON_SPAN / 2
-    lon_max = LON_CENTER + LON_SPAN / 2
-    x_min_m = (lon_min - LON_CENTER) * 111320 * np.cos(np.radians(LAT_CENTER))
-    x_max_m = (lon_max - LON_CENTER) * 111320 * np.cos(np.radians(LAT_CENTER))
-    y_min_m = (lat_min - LAT_CENTER) * 111320
-    y_max_m = (lat_max - LAT_CENTER) * 111320
-    fig.add_layout_image(
-        dict(
-            source=f"data:image/png;base64,{sat_b64}",
-            xref="paper",
-            yref="paper",
-            x=0.72,
-            y=0.28,
-            sizex=0.26,
-            sizey=0.26,
-            xanchor="left",
-            yanchor="bottom",
-            opacity=0.92,
-            layer="above",
-        )
-    )
-    # Anotacija za thumbnail
-    fig.add_annotation(
-        x=0.72,
-        y=0.28,
-        xref="paper",
-        yref="paper",
-        text="Satelitska snimka (thumbnail)",
-        showarrow=False,
-        font=dict(size=9, color="rgba(200,200,200,0.8)"),
-        bgcolor="rgba(10,10,30,0.6)",
-        xanchor="left",
-        yanchor="top",
-    )
+# ── 2D satelitski bočni panel + JS cursor koji prati 3D hover ────────────────
+def to_svg_pts(xs, ys):
+    """Pretvara metre koordinate u SVG viewBox (0-100) koordinate."""
+    pts = []
+    for x, y in zip(xs, ys):
+        svgx = (float(x) - float(x_m[0])) / (float(x_m[-1]) - float(x_m[0])) * 100
+        svgy = (1.0 - (float(y) - float(y_m[0])) / (float(y_m[-1]) - float(y_m[0]))) * 100
+        pts.append(f"{svgx:.2f},{svgy:.2f}")
+    return " ".join(pts)
 
-fig.write_html(OUT_HTML, include_plotlyjs="cdn")
-print(f"\nInteraktivna 3D mapa: {OUT_HTML}")
+
+trust_svg_pts = to_svg_pts(rx, ry)
+known_svg_pts = to_svg_pts(krx, kry)
+
+js_xmin = float(x_m[0])
+js_xmax = float(x_m[-1])
+js_ymin = float(y_m[0])
+js_ymax = float(y_m[-1])
+
+# Figura → HTML fragment (bez <html><body> wraппa)
+plot_div_html = fig.to_html(include_plotlyjs="cdn", full_html=False, div_id="plotly-3d")
+
+if sat_b64:
+    sat_panel_html = f"""  <div id="side-panel">
+    <div class="panel-title">&#128225; Satelitska snimka 2D</div>
+    <div id="sat-container">
+      <img id="sat-img" src="data:image/png;base64,{sat_b64}" alt="Satelitska snimka"/>
+      <svg id="sat-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
+        <polyline points="{trust_svg_pts}" fill="none" stroke="gold" stroke-width="0.9"
+                  stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
+        <polyline points="{known_svg_pts}" fill="none" stroke="mediumpurple" stroke-width="0.9"
+                  stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
+        <line id="cur-h" x1="0" y1="50" x2="100" y2="50"
+              stroke="red" stroke-width="0.5" stroke-opacity="0.65"
+              vector-effect="non-scaling-stroke" style="display:none"/>
+        <line id="cur-v" x1="50" y1="0" x2="50" y2="100"
+              stroke="red" stroke-width="0.5" stroke-opacity="0.65"
+              vector-effect="non-scaling-stroke" style="display:none"/>
+        <circle id="cur-circle" cx="50" cy="50" r="2.5"
+                fill="none" stroke="red" stroke-width="0.9"
+                vector-effect="non-scaling-stroke" style="display:none"/>
+      </svg>
+    </div>
+    <div id="hover-info">Hover na 3D mapi za prikaz pozicije</div>
+    <div id="legend">
+      <div class="leg"><span class="leg-dot" style="background:gold"></span>TRUST ROUTE ({route_dist[-1]:.0f} m)</div>
+      <div class="leg"><span class="leg-dot" style="background:mediumpurple"></span>KNOWN ROUTE ({kroute_dist[-1]:.0f} m)</div>
+      <hr class="leg-sep"/>
+      <div class="leg-head">Trusted Area sloj:</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(0,255,50)"></span>100% &ndash; UGV prosao</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(100,220,0)"></span>70% &ndash; Otvoreno</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(200,180,0)"></span>50% &ndash; &Scaron;uma</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(255,80,0)"></span>30% &ndash; Prekinut put</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(0,0,180)"></span>0% &ndash; Voda/Blokada</div>
+    </div>
+  </div>"""
+else:
+    sat_panel_html = ""
+
+full_html = f"""<!DOCTYPE html>
+<html lang="hr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>3D Terrain Navigation Map &ndash; SOCA</title>
+  <style>
+    * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+    body {{
+      background: #08080e;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      color: #ddd;
+    }}
+    #plot-wrap {{ flex: 1; min-width: 0; position: relative; }}
+    #plot-wrap > div {{ width: 100% !important; height: 100% !important; }}
+    #side-panel {{
+      width: 290px;
+      flex-shrink: 0;
+      background: #0a0a1a;
+      border-left: 1px solid rgba(255,255,255,0.12);
+      display: flex;
+      flex-direction: column;
+      padding: 12px;
+      overflow-y: auto;
+      gap: 0;
+    }}
+    .panel-title {{
+      font-size: 12px;
+      font-weight: 600;
+      color: #aaa;
+      margin-bottom: 8px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }}
+    #sat-container {{
+      position: relative;
+      width: 100%;
+      aspect-ratio: 1 / 1;
+      overflow: hidden;
+      border: 1px solid rgba(255,255,255,0.15);
+    }}
+    #sat-img {{
+      width: 100%;
+      height: 100%;
+      display: block;
+      object-fit: cover;
+      image-rendering: pixelated;
+    }}
+    #sat-overlay {{
+      position: absolute;
+      top: 0; left: 0;
+      width: 100%; height: 100%;
+      pointer-events: none;
+    }}
+    #hover-info {{
+      font-size: 11px;
+      color: #999;
+      margin-top: 8px;
+      min-height: 36px;
+      line-height: 1.6;
+    }}
+    #legend {{ margin-top: 12px; }}
+    .leg-head {{ font-size: 11px; color: #888; margin-bottom: 4px; font-style: italic; }}
+    .leg {{
+      display: flex;
+      align-items: center;
+      font-size: 11px;
+      color: #bbb;
+      margin-bottom: 5px;
+    }}
+    .leg-dot {{
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      margin-right: 7px;
+      flex-shrink: 0;
+      border: 1px solid rgba(255,255,255,0.2);
+    }}
+    .leg-sep {{
+      border: none;
+      border-top: 1px solid rgba(255,255,255,0.1);
+      margin: 8px 0;
+    }}
+  </style>
+</head>
+<body>
+  <div id="plot-wrap">{plot_div_html}</div>
+{sat_panel_html}
+  <script>
+    (function () {{
+      var xMin = {js_xmin:.4f}, xMax = {js_xmax:.4f};
+      var yMin = {js_ymin:.4f}, yMax = {js_ymax:.4f};
+
+      function worldToSVG(x, y) {{
+        return {{
+          sx: (x - xMin) / (xMax - xMin) * 100,
+          sy: (1 - (y - yMin) / (yMax - yMin)) * 100
+        }};
+      }}
+
+      function attachHover() {{
+        var plotDiv = document.getElementById('plotly-3d');
+        if (!plotDiv || typeof plotDiv.on !== 'function') {{
+          setTimeout(attachHover, 300);
+          return;
+        }}
+        var curCircle = document.getElementById('cur-circle');
+        var curH      = document.getElementById('cur-h');
+        var curV      = document.getElementById('cur-v');
+        var hoverInfo = document.getElementById('hover-info');
+        if (!curCircle) return;
+
+        plotDiv.on('plotly_hover', function (ev) {{
+          if (!ev.points || !ev.points[0]) return;
+          var pt = ev.points[0];
+          var p  = worldToSVG(pt.x, pt.y);
+
+          curCircle.setAttribute('cx', p.sx); curCircle.setAttribute('cy', p.sy);
+          curH.setAttribute('y1', p.sy);      curH.setAttribute('y2', p.sy);
+          curV.setAttribute('x1', p.sx);      curV.setAttribute('x2', p.sx);
+          curCircle.style.display = '';
+          curH.style.display      = '';
+          curV.style.display      = '';
+
+          if (hoverInfo) hoverInfo.innerHTML =
+            '<b style="color:#fff">Pozicija:</b><br>' +
+            'X: ' + pt.x.toFixed(1) + ' m &nbsp; Y: ' + pt.y.toFixed(1) + ' m<br>' +
+            'Visina: ' + (pt.z ? pt.z.toFixed(1) + ' m' : '&mdash;');
+        }});
+
+        plotDiv.on('plotly_unhover', function () {{
+          if (curCircle) curCircle.style.display = 'none';
+          if (curH)      curH.style.display      = 'none';
+          if (curV)      curV.style.display      = 'none';
+          if (hoverInfo) hoverInfo.textContent    = 'Hover na 3D mapi za prikaz pozicije';
+        }});
+      }}
+
+      window.addEventListener('load', function () {{ setTimeout(attachHover, 500); }});
+    }})();
+  </script>
+</body>
+</html>"""
+
+with open(OUT_HTML, "w", encoding="utf-8") as _f:
+    _f.write(full_html)
+print(f"\nInteraktivna 3D mapa (2D panel + Trusted Area): {OUT_HTML}")
 
 # ── 7. Statican PNG (matplotlib) ─────────────────────────────────────────────
 import matplotlib
