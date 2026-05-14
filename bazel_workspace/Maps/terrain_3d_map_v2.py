@@ -3,14 +3,13 @@ Koordinate: 48.2295, 11.6219 (München okolica, prosirena mapa)
 - Visinski podaci: OpenTopography Copernicus DEM 30m (COP30, kesiran)
 - Layer 1: Traversability overlay (HSV segmentacija image.png)
 - Layer 2: Satelitska tekstura (ESRI World Imagery)
-- A* putanja: automatski izracunata (cyan)
-- TRUST ROUTE:  zlatna  — 10.9.0.50_2026-05-08_12-10-46 (168m, potvrdjena)
-- KNOWN ROUTE:  ljubicasta — 10.9.0.50_2026-05-08_09-51-50 (850m, ispitana)
+- PATH 1: zlatna  — 10.9.0.50_2026-05-08_12-10-46 (robot, 100% provjereno)
+- PATH 2: ljubicasta — 10.9.0.50_2026-05-08_09-51-50 (robot, 100% provjereno)
 - Interaktivni HTML: layer toggle, rotacija, zoom, hover
 """
 
 import base64
-import heapq
+import io
 import json
 import os
 import time
@@ -21,8 +20,8 @@ import requests
 
 MAPS_DIR = "/home/mn/soca/bazel_workspace/Maps"
 IMG_PATH = os.path.join(MAPS_DIR, "image.png")
-JSONL_TRUST = os.path.join(MAPS_DIR, "10.9.0.50_2026-05-08_12-10-46_UTC.jsonl")
-JSONL_KNOWN = os.path.join(MAPS_DIR, "10.9.0.50_2026-05-08_09-51-50_UTC.jsonl")
+JSONL_PATH1 = os.path.join(MAPS_DIR, "10.9.0.50_2026-05-08_12-10-46_UTC.jsonl")
+JSONL_PATH2 = os.path.join(MAPS_DIR, "10.9.0.50_2026-05-08_09-51-50_UTC.jsonl")
 OUT_HTML = os.path.join(MAPS_DIR, "terrain_3d_result.html")
 OUT_PNG = os.path.join(MAPS_DIR, "terrain_3d_result.png")
 
@@ -39,33 +38,44 @@ if os.path.exists(_api_key_file):
                 break
 OT_API_KEY = OT_API_KEY or os.environ.get("OT_API_KEY", "")
 
-GRID_N = 60       # grid rezolucija (celija po osi)
+GRID_N = 60  # grid rezolucija (celija po osi)
 _SAT_MARGIN = 1.5  # 50% margine oko GPS bounding boxa za satelitsku/DEM tile
 
 
 # ── UTM Zone 32N ↔ WGS84 konverzija ─────────────────────────────────────────
 import math as _math
 
+
 def _utm32n_to_latlon(easting, northing):
     """UTM Zone 32N (WGS84) → (lat_deg, lon_deg)."""
-    a = 6378137.0; f = 1 / 298.257223563
-    b = a * (1 - f); e2 = 1 - (b / a) ** 2; ep2 = (a / b) ** 2 - 1
-    k0 = 0.9996; E0 = 500000; lon0 = _math.radians(9)  # Zone 32N: meridian 9°E
-    x = easting - E0; y = northing
+    a = 6378137.0
+    f = 1 / 298.257223563
+    b = a * (1 - f)
+    e2 = 1 - (b / a) ** 2
+    ep2 = (a / b) ** 2 - 1
+    k0 = 0.9996
+    E0 = 500000
+    lon0 = _math.radians(9)  # Zone 32N: meridian 9°E
+    x = easting - E0
+    y = northing
     M = y / k0
-    mu = M / (a * (1 - e2 / 4 - 3 * e2 ** 2 / 64 - 5 * e2 ** 3 / 256))
+    mu = M / (a * (1 - e2 / 4 - 3 * e2**2 / 64 - 5 * e2**3 / 256))
     e1 = (1 - _math.sqrt(1 - e2)) / (1 + _math.sqrt(1 - e2))
-    phi1 = (mu
-            + (3 * e1 / 2 - 27 * e1 ** 3 / 32) * _math.sin(2 * mu)
-            + (21 * e1 ** 2 / 16 - 55 * e1 ** 4 / 32) * _math.sin(4 * mu)
-            + (151 * e1 ** 3 / 96) * _math.sin(6 * mu))
+    phi1 = (
+        mu
+        + (3 * e1 / 2 - 27 * e1**3 / 32) * _math.sin(2 * mu)
+        + (21 * e1**2 / 16 - 55 * e1**4 / 32) * _math.sin(4 * mu)
+        + (151 * e1**3 / 96) * _math.sin(6 * mu)
+    )
     N1 = a / _math.sqrt(1 - e2 * _math.sin(phi1) ** 2)
-    T1 = _math.tan(phi1) ** 2; C1 = ep2 * _math.cos(phi1) ** 2
+    T1 = _math.tan(phi1) ** 2
+    C1 = ep2 * _math.cos(phi1) ** 2
     R1 = a * (1 - e2) / (1 - e2 * _math.sin(phi1) ** 2) ** 1.5
     D = x / (N1 * k0)
     lat = phi1 - (N1 * _math.tan(phi1) / R1) * (
-        D ** 2 / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1 ** 2 - 9 * ep2) * D ** 4 / 24)
-    lon = lon0 + (D - (1 + 2 * T1 + C1) * D ** 3 / 6) / _math.cos(phi1)
+        D**2 / 2 - (5 + 3 * T1 + 10 * C1 - 4 * C1**2 - 9 * ep2) * D**4 / 24
+    )
+    lon = lon0 + (D - (1 + 2 * T1 + C1) * D**3 / 6) / _math.cos(phi1)
     return _math.degrees(lat), _math.degrees(lon)
 
 
@@ -89,7 +99,7 @@ def _gps_bounds_from_jsonl(paths):
 
 
 # ── Auto-compute map bounds iz GPS podataka ──────────────────────────────────
-_e_min, _e_max, _n_min, _n_max = _gps_bounds_from_jsonl([JSONL_TRUST, JSONL_KNOWN])
+_e_min, _e_max, _n_min, _n_max = _gps_bounds_from_jsonl([JSONL_PATH1, JSONL_PATH2])
 UTM_E_CENTER = (_e_min + _e_max) / 2
 UTM_N_CENTER = (_n_min + _n_max) / 2
 LAT_CENTER, LON_CENTER = _utm32n_to_latlon(UTM_E_CENTER, UTM_N_CENTER)
@@ -102,14 +112,20 @@ LAT_SPAN = round(_lat_half * 2, 5)
 LON_SPAN = round(_lon_half * 2, 5)
 
 print(f"Auto MAP centar: {LAT_CENTER:.6f}N, {LON_CENTER:.6f}E")
-print(f"Auto MAP span:   LAT={LAT_SPAN:.5f}° ({LAT_SPAN*111320:.0f}m)  "
-      f"LON={LON_SPAN:.5f}° ({LON_SPAN*111320*_cos_lat:.0f}m)")
+print(
+    f"Auto MAP span:   LAT={LAT_SPAN:.5f}° ({LAT_SPAN*111320:.0f}m)  "
+    f"LON={LON_SPAN:.5f}° ({LON_SPAN*111320*_cos_lat:.0f}m)"
+)
 
 # ── Invalidiraj satelitski cache ako se centar promijenio ───────────────────
 _sat_meta_path = os.path.join(MAPS_DIR, "satellite_meta.json")
 _sat_cache_path = os.path.join(MAPS_DIR, "satellite_tile.png")
-_sat_meta = {"lat": round(LAT_CENTER, 6), "lon": round(LON_CENTER, 6),
-             "lat_span": LAT_SPAN, "lon_span": LON_SPAN}
+_sat_meta = {
+    "lat": round(LAT_CENTER, 6),
+    "lon": round(LON_CENTER, 6),
+    "lat_span": LAT_SPAN,
+    "lon_span": LON_SPAN,
+}
 if os.path.exists(_sat_meta_path):
     with open(_sat_meta_path) as _f:
         _old_meta = json.load(_f)
@@ -157,8 +173,10 @@ def fetch_elevation_grid():
     # ── Cache invalidacija: brisi ako se centar/span promijenio ────────────
     _elev_meta_path = os.path.join(MAPS_DIR, "elevation_meta.json")
     _elev_meta_curr = {
-        "lat": round(LAT_CENTER, 6), "lon": round(LON_CENTER, 6),
-        "lat_span": LAT_SPAN, "lon_span": LON_SPAN,
+        "lat": round(LAT_CENTER, 6),
+        "lon": round(LON_CENTER, 6),
+        "lat_span": LAT_SPAN,
+        "lon_span": LON_SPAN,
     }
     if os.path.exists(_elev_meta_path):
         with open(_elev_meta_path) as _mf:
@@ -292,11 +310,11 @@ def _read_gps_alt(jsonl_path):
     return np.array(alts), np.array(xs), np.array(ys)
 
 
-gps_alt_t, gps_x_t, gps_y_t = _read_gps_alt(JSONL_TRUST)
-gps_alt_k, gps_x_k, gps_y_k = _read_gps_alt(JSONL_KNOWN)
-all_gps_alt = np.concatenate([gps_alt_t, gps_alt_k])
-all_gps_x = np.concatenate([gps_x_t, gps_x_k])
-all_gps_y = np.concatenate([gps_y_t, gps_y_k])
+gps_alt_1, gps_x_1, gps_y_1 = _read_gps_alt(JSONL_PATH1)
+gps_alt_2, gps_x_2, gps_y_2 = _read_gps_alt(JSONL_PATH2)
+all_gps_alt = np.concatenate([gps_alt_1, gps_alt_2])
+all_gps_x = np.concatenate([gps_x_1, gps_x_2])
+all_gps_y = np.concatenate([gps_y_1, gps_y_2])
 
 dem_at_gps = _dem_at_xy(all_gps_x, all_gps_y)
 DEM_OFFSET = float(np.median(all_gps_alt) - np.median(dem_at_gps))
@@ -309,13 +327,12 @@ print(f"Elevacija (kalibrirano): {elev_s.min():.1f}-{elev_s.max():.1f}m")
 
 # UGV telemetrija: antena je ~0.5m iznad tla, vizualni offset 1.5m
 GPS_HEIGHT = 0.5  # m — visina UGV antene iznad tla
-ROUTE_Z_OFFSET = 0.0  # m — ruta je tacno GPS_HEIGHT iznad terena (0.5m)
 
 
 def snap_to_terrain(xs, ys):
     """Interpolira kalibriranu visinu terena i vraca z = teren + GPS_HEIGHT."""
     terrain_z = _dem_at_xy(xs, ys)
-    return (terrain_z + GPS_HEIGHT + ROUTE_Z_OFFSET).tolist()
+    return (terrain_z + GPS_HEIGHT).tolist()
 
 
 # ── 2. Traversability mapa ───────────────────────────────────────────────────
@@ -355,7 +372,8 @@ def compute_trust_map(c_map, route_specs):
       0.50 = suma/vegetacija (c_map 0.45-0.88)
       0.70 = otvoreno zemljiste (c_map < 0.45)
     """
-    from scipy.ndimage import label as nd_label, gaussian_filter as gf
+    from scipy.ndimage import gaussian_filter as gf
+    from scipy.ndimage import label as nd_label
 
     trust = np.full((GRID_N, GRID_N), 0.70, dtype=float)
 
@@ -375,23 +393,36 @@ def compute_trust_map(c_map, route_specs):
             trust[labeled == comp_id] = 0.30
 
     # GPS rute → nivo povjerenja prema specifikaciji (buffer ±1 celija)
+    robot_mask = np.zeros((GRID_N, GRID_N), dtype=bool)
     for spec in route_specs:
         t_level = float(spec["trust"])
         for x, y in zip(spec["xs"], spec["ys"]):
-            col = (float(x) - float(x_m[0])) / (float(x_m[-1]) - float(x_m[0])) * (GRID_N - 1)
-            row = (float(y) - float(y_m[0])) / (float(y_m[-1]) - float(y_m[0])) * (GRID_N - 1)
+            col = (
+                (float(x) - float(x_m[0]))
+                / (float(x_m[-1]) - float(x_m[0]))
+                * (GRID_N - 1)
+            )
+            row = (
+                (float(y) - float(y_m[0]))
+                / (float(y_m[-1]) - float(y_m[0]))
+                * (GRID_N - 1)
+            )
             col_i = int(np.clip(round(col), 0, GRID_N - 1))
             row_i = int(np.clip(round(row), 0, GRID_N - 1))
             for dr in range(-1, 2):
                 for dc in range(-1, 2):
                     nr, nc = row_i + dr, col_i + dc
                     if 0 <= nr < GRID_N and 0 <= nc < GRID_N:
+                        robot_mask[nr, nc] = True
                         # Samo povecavaj trust, nikad ne smanjuj
                         if t_level > trust[nr, nc]:
                             trust[nr, nc] = t_level
 
     trust = gf(trust, sigma=0.5)
-    trust[water_mask] = 0.00  # vodu ne zamagljujemo
+    # Robot je prosao: ako cost_map kaže blokada ali robot prošao → riskantan (0.9)
+    # Prava blokada (bez robota) → 0.0
+    trust[water_mask & robot_mask] = 0.90
+    trust[water_mask & ~robot_mask] = 0.00
     return np.clip(trust, 0.0, 1.0)
 
 
@@ -520,100 +551,96 @@ def load_trust_route(jsonl_path):
     return route_x, route_y, route_z, route_spd, route_dist, route_ts
 
 
-route_x, route_y, route_z, route_spd, route_dist, route_ts = load_trust_route(
-    JSONL_TRUST
-)
+p1_x, p1_y, p1_z, p1_spd, p1_dist, p1_ts = load_trust_route(JSONL_PATH1)
 
-# Downsample trust rute
+# Downsample PATH 1
 STEP = 5
-rx = route_x[::STEP]
-ry = route_y[::STEP]
-# Snapujemo na teren umjesto GPS altitude (izbjegava WGS84-vs-DEM razliku)
-rz = snap_to_terrain(rx, ry)
-rs = route_spd[::STEP]
-rd = route_dist[::STEP]
-rt = route_ts[::STEP]
+p1x = p1_x[::STEP]
+p1y = p1_y[::STEP]
+p1z = snap_to_terrain(p1x, p1y)
+p1s = p1_spd[::STEP]
+p1d = p1_dist[::STEP]
+p1t = p1_ts[::STEP]
 
-# ── Known Route (09-51-50) ───────────────────────────────────────────────────
+# ── PATH 2 (09-51-50) ───────────────────────────────────────────────────────
 print("")
-kroute_x, kroute_y, kroute_z, kroute_spd, kroute_dist, kroute_ts = load_trust_route(
-    JSONL_KNOWN
-)
-KSTEP = 8  # veca ruta, veci korak
-krx = kroute_x[::KSTEP]
-kry = kroute_y[::KSTEP]
-# Snapujemo na teren — UGV ruta ne prolazi kroz zemlju
-krz = snap_to_terrain(krx, kry)
-krs = kroute_spd[::KSTEP]
-krd = kroute_dist[::KSTEP]
-krt = kroute_ts[::KSTEP]
+p2_x, p2_y, p2_z, p2_spd, p2_dist, p2_ts = load_trust_route(JSONL_PATH2)
+KSTEP = 8
+p2x = p2_x[::KSTEP]
+p2y = p2_y[::KSTEP]
+p2z = snap_to_terrain(p2x, p2y)
+p2s = p2_spd[::KSTEP]
+p2d = p2_dist[::KSTEP]
+p2t = p2_ts[::KSTEP]
 
 # ── Trust mapa (racuna se tek kad su obje rute ucitane) ──────────────────────
-# TRUST route (12-10-46): 100% — UGV svjedoci da je teren prohodan
-# KNOWN route (09-51-50):  70% — ispitano, nije direktno vozeno
+# Obje rute su robotske — 100% provjereno da je teren prohodan
 print("Racunam trust mapu...")
-trust_map = compute_trust_map(cost_map, [
-    {"xs": route_x,  "ys": route_y,  "trust": 1.00},  # TRUST: potvrdjena
-    {"xs": kroute_x, "ys": kroute_y, "trust": 0.70},  # KNOWN: ispitana
-])
-print(f"  Trust: min={trust_map.min():.2f}  max={trust_map.max():.2f}  "
-      f"GPS 100% celija: {(trust_map > 0.95).sum()}  GPS 70%+ celija: {(trust_map >= 0.68).sum()}")
+trust_map = compute_trust_map(
+    cost_map,
+    [
+        {"xs": p1_x, "ys": p1_y, "trust": 1.00},  # PATH 1: robot potvrdio
+        {"xs": p2_x, "ys": p2_y, "trust": 1.00},  # PATH 2: robot potvrdio
+    ],
+)
+print(
+    f"  Trust: min={trust_map.min():.2f}  max={trust_map.max():.2f}  "
+    f"GPS 100% celija: {(trust_map > 0.95).sum()}  GPS 70%+ celija: {(trust_map >= 0.68).sum()}"
+)
 
 
-# ── 5. A* path planning ──────────────────────────────────────────────────────
-def astar(cost_map, elev, start, goal):
-    n = cost_map.shape[0]
-    open_set = [(0.0, start)]
-    came_from = {}
-    g = {start: 0.0}
-    dirs = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
-    while open_set:
-        _, cur = heapq.heappop(open_set)
-        if cur == goal:
-            path = []
-            while cur in came_from:
-                path.append(cur)
-                cur = came_from[cur]
-            return [start] + path[::-1]
-        r, c = cur
-        for dr, dc in dirs:
-            nr, nc = r + dr, c + dc
-            if not (0 <= nr < n and 0 <= nc < n):
-                continue
-            if cost_map[nr, nc] > 0.88:
-                continue
-            dh = abs(float(elev[nr, nc]) - float(elev[r, c]))
-            dxy = max(
-                np.sqrt(
-                    (dr * (LAT_SPAN / GRID_N) * 111320) ** 2
-                    + (
-                        dc
-                        * (LON_SPAN / GRID_N)
-                        * 111320
-                        * np.cos(np.radians(LAT_CENTER))
-                    )
-                    ** 2
-                ),
-                0.1,
-            )
-            sc = min(np.degrees(np.arctan(dh / dxy)) / 30.0, 1.5)
-            ng = g[cur] + np.sqrt(dr**2 + dc**2) * (cost_map[nr, nc] + sc + 0.1)
-            if ng < g.get((nr, nc), 1e18):
-                came_from[(nr, nc)] = cur
-                g[(nr, nc)] = ng
-                heapq.heappush(
-                    open_set,
-                    (
-                        ng + np.sqrt((nr - goal[0]) ** 2 + (nc - goal[1]) ** 2) * 0.1,
-                        (nr, nc),
-                    ),
-                )
-    return []
+# ── Trust overlay PNG za 2D panel ────────────────────────────────────────────
+def _make_trust_overlay_b64(tm):
+    """Pretvara trust_map u RGBA PNG (isti colorscale) za 2D satelitski panel."""
+    from PIL import Image as _PIL_Image
+
+    stops_v = np.array([0.00, 0.30, 0.50, 0.70, 0.90, 1.00])
+    # R, G, B, A — zelena zona niska alpha (tlo je uglavnom prolazno)
+    stops_c = np.array(
+        [
+            [139, 0, 0, 195],  # blokada
+            [255, 90, 90, 160],  # prekinut put
+            [230, 160, 0, 145],  # suma/amber
+            [40, 200, 80, 55],  # zelena — niska alpha, samo hint
+            [0, 191, 255, 185],  # sky-blue — robot, riskantan
+            [30, 144, 255, 210],  # plava — trusted
+        ],
+        dtype=float,
+    )
+    flat = tm.ravel()
+    out = np.zeros((flat.size, 4), dtype=np.uint8)
+    for i in range(len(stops_v) - 1):
+        v0, v1 = stops_v[i], stops_v[i + 1]
+        mask = (flat >= v0) & (
+            flat <= v1 if i < len(stops_v) - 2 else flat <= v1 + 0.001
+        )
+        if not mask.any():
+            continue
+        t = (flat[mask] - v0) / (v1 - v0) if v1 > v0 else np.zeros(mask.sum())
+        t = t[:, None]
+        out[mask] = np.clip(
+            stops_c[i] + t * (stops_c[i + 1] - stops_c[i]), 0, 255
+        ).astype(np.uint8)
+    h, w = tm.shape
+    rgba = out.reshape(h, w, 4)
+    img = _PIL_Image.fromarray(rgba, "RGBA")
+    img = img.resize((300, 300), _PIL_Image.BILINEAR)
+    # trust_map row 0 = jug → flipuj za prikaz (sjever gore)
+    img = img.transpose(_PIL_Image.FLIP_TOP_BOTTOM)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
 
 
-print("Racunam A* putanju...")
-path = astar(cost_map, elev_s, (2, 2), (GRID_N - 3, GRID_N - 3))
-print(f"A* putanja: {len(path)} koraka")
+trust_overlay_b64 = _make_trust_overlay_b64(trust_map)
+
+# Serialize terrain grids for JS interactive routing engine
+_js_cost_data = json.dumps([round(float(v), 3) for v in cost_map.ravel()])
+_js_trust_data = json.dumps([round(float(v), 3) for v in trust_map.ravel()])
+_js_elev_data = json.dumps([round(float(v), 2) for v in elev_s.ravel()])
+_js_xarr_data = json.dumps([round(float(v), 2) for v in x_m])
+_js_yarr_data = json.dumps([round(float(v), 2) for v in y_m])
+
 
 # ── 6. Plotly interaktivna 3D mapa ───────────────────────────────────────────
 import plotly.graph_objects as go
@@ -686,21 +713,21 @@ else:
         showscale=False,
     )
 
-traces = [surf_trav, surf_sat]
-
 # ─ Surface: Trusted Area layer ─
 # Semantika boja (dobro se upari sa satelitskim snimkom u hybrid modu):
 #   tamno crvena  = apsolutna blokada (voda, zid)      → nikad ne idi
 #   svetlo crvena = moguća prepreka / prekinut put     → pazi
 #   amber         = šuma / teže prohodan teren         → otežano
 #   zelena        = evaluirano s mape, nepotvrdeno UGV → vjerovatno ok
+#   sky-blue      = robot prošao, riskantan teren      → oprez
 #   plava         = UGV potvrdio prolaz (trusted)      → idi
 colorscale_trust = [
-    [0.00, "rgb(139,0,0)"],    # tamno crvena — apsolutna blokada
+    [0.00, "rgb(139,0,0)"],  # tamno crvena — apsolutna blokada
     [0.30, "rgb(255,90,90)"],  # svetlo crvena — prekinut put / upozorenje
     [0.50, "rgb(230,160,0)"],  # amber         — suma / teze prohodan
     [0.70, "rgb(40,200,80)"],  # zelena        — evaluirano s mape, nije UGV
-    [1.00, "rgb(30,144,255)"], # plava         — UGV prosao, trusted
+    [0.90, "rgb(0,191,255)"],  # sky-blue      — robot prosao, riskantan teren
+    [1.00, "rgb(30,144,255)"],  # plava         — UGV prosao, trusted
 ]
 surf_trust = go.Surface(
     x=XX,
@@ -717,80 +744,56 @@ surf_trust = go.Surface(
     showscale=True,
     colorbar=dict(
         title="Trust %",
-        tickvals=[0.0, 0.30, 0.50, 0.70, 1.0],
-        ticktext=["0% Blokada", "30% Put?", "50% Šuma", "70% Otvoreno", "100% UGV"],
-        len=0.50,
+        tickvals=[0.0, 0.30, 0.50, 0.70, 0.90, 1.0],
+        ticktext=[
+            "0% Blokada",
+            "30% Put?",
+            "50% Šuma",
+            "70% Otvoreno",
+            "90% Riskantan",
+            "100% UGV",
+        ],
+        len=0.55,
         x=0.88,
     ),
 )
 
 traces = [surf_trav, surf_sat, surf_trust]
 
-# ─ A* putanja ─
-if path:
-    px = [float(x_m[c]) for r, c in path]
-    py = [float(y_m[r]) for r, c in path]
-    pz = [float(elev_s[r, c]) + 3 for r, c in path]
-    traces.append(
-        go.Scatter3d(
-            x=px,
-            y=py,
-            z=pz,
-            mode="lines",
-            line=dict(color="cyan", width=4),
-            name="A* Putanja (planer)",
-            hoverinfo="skip",
-        )
-    )
-    traces.append(
-        go.Scatter3d(
-            x=[px[0], px[-1]],
-            y=[py[0], py[-1]],
-            z=[pz[0] + 1, pz[-1] + 1],
-            mode="markers+text",
-            marker=dict(size=9, color=["lime", "red"], symbol="diamond"),
-            text=["A* START", "A* CILJ"],
-            textposition="top center",
-            textfont=dict(size=11, color="white"),
-            name="A* Start/Cilj",
-            hoverinfo="text",
-        )
-    )
-
-# ─ TRUST ROUTE (GPS iz JSONL) ─
-hover_trust = [
-    f"<b>TRUST ROUTE</b><br>"
-    f"Dist: {rd[i]:.1f}m<br>"
-    f"Alt: {route_z[::STEP][i]:.2f}m<br>"
-    f"Brzina: {rs[i]:.1f}km/h<br>"
-    f"Vrijeme: {rt[i][:19].replace('T',' ')}"
-    for i in range(len(rx))
+# ─ PATH 1 (GPS iz JSONL) ─
+hover_p1 = [
+    f"<b>PATH 1</b><br>"
+    f"Dist: {p1d[i]:.1f}m<br>"
+    f"Alt: {p1_z[::STEP][i]:.2f}m<br>"
+    f"Brzina: {p1s[i]:.1f}km/h<br>"
+    f"Vrijeme: {p1t[i][:19].replace('T',' ')}"
+    for i in range(len(p1x))
 ]
 traces.append(
     go.Scatter3d(
-        x=rx,
-        y=ry,
-        z=rz,
+        x=p1x,
+        y=p1y,
+        z=p1z,
         mode="lines+markers",
         line=dict(color="gold", width=6),
         marker=dict(
             size=3,
-            color=route_dist[::STEP],
+            color=p1_dist[::STEP],
             colorscale="YlOrRd",
             showscale=False,
         ),
-        name="TRUST ROUTE (GPS realizovana, 100%)",
-        hovertext=hover_trust,
+        name=f"PATH 1 (robot, 100% — {p1_dist[-1]:.0f}m)",
+        hovertext=hover_p1,
         hoverinfo="text",
     )
 )
 
-# Markeri start/kraj trust route
+# Markeri start/kraj PATH 1
 traces.append(
     go.Scatter3d(
-        x=[rx[0], rx[-1]],
-        y=[ry[0], ry[-1]],
-        z=[rz[0] + 1.5, rz[-1] + 1.5],
+        x=[p1x[0], p1x[-1]],
+        y=[p1y[0], p1y[-1]],
+        z=[p1z[0] + 1.5, p1z[-1] + 1.5],
         mode="markers+text",
         marker=dict(
             size=12,
@@ -798,47 +801,47 @@ traces.append(
             symbol="circle",
             line=dict(color="white", width=2),
         ),
-        text=["ROBOT START", "ROBOT KRAJ"],
+        text=["P1 START", "P1 KRAJ"],
         textposition=["top center", "top center"],
         textfont=dict(size=12, color="gold"),
-        name="Robot Start/Kraj",
+        name="P1 Start/Kraj",
         hoverinfo="text",
     )
 )
 
-# ─ KNOWN ROUTE (GPS iz 09-51-50 JSONL) ─
-hover_known = [
-    f"<b>KNOWN ROUTE</b><br>"
-    f"Dist: {krd[i]:.1f}m<br>"
-    f"Alt: {kroute_z[::KSTEP][i]:.2f}m<br>"
-    f"Brzina: {krs[i]:.1f}km/h<br>"
-    f"Vrijeme: {krt[i][:19].replace('T',' ')}"
-    for i in range(len(krx))
+# ─ PATH 2 (GPS iz 09-51-50 JSONL) ─
+hover_p2 = [
+    f"<b>PATH 2</b><br>"
+    f"Dist: {p2d[i]:.1f}m<br>"
+    f"Alt: {p2_z[::KSTEP][i]:.2f}m<br>"
+    f"Brzina: {p2s[i]:.1f}km/h<br>"
+    f"Vrijeme: {p2t[i][:19].replace('T',' ')}"
+    for i in range(len(p2x))
 ]
 traces.append(
     go.Scatter3d(
-        x=krx,
-        y=kry,
-        z=krz,
+        x=p2x,
+        y=p2y,
+        z=p2z,
         mode="lines+markers",
         line=dict(color="mediumpurple", width=6),
         marker=dict(
             size=3,
-            color=kroute_dist[::KSTEP],
+            color=p2_dist[::KSTEP],
             colorscale="Purples",
             showscale=False,
         ),
-        name="KNOWN ROUTE (ispitana, 850m)",
-        hovertext=hover_known,
+        name=f"PATH 2 (robot, 100% — {p2_dist[-1]:.0f}m)",
+        hovertext=hover_p2,
         hoverinfo="text",
     )
 )
-# Markeri start/kraj known route
+# Markeri start/kraj PATH 2
 traces.append(
     go.Scatter3d(
-        x=[krx[0], krx[-1]],
-        y=[kry[0], kry[-1]],
-        z=[krz[0] + 1.5, krz[-1] + 1.5],
+        x=[p2x[0], p2x[-1]],
+        y=[p2y[0], p2y[-1]],
+        z=[p2z[0] + 1.5, p2z[-1] + 1.5],
         mode="markers+text",
         marker=dict(
             size=12,
@@ -846,10 +849,10 @@ traces.append(
             symbol="square",
             line=dict(color="white", width=2),
         ),
-        text=["KNOWN START", "KNOWN KRAJ"],
+        text=["P2 START", "P2 KRAJ"],
         textposition=["top center", "top center"],
         textfont=dict(size=12, color="mediumpurple"),
-        name="Known Start/Kraj",
+        name="P2 Start/Kraj",
         hoverinfo="text",
     )
 )
@@ -874,7 +877,19 @@ fig.update_layout(
                     label="Satelitski",
                     method="update",
                     args=[
-                        {"visible": [False, True, False, True, True, True, True, True, True]}
+                        {
+                            "visible": [
+                                False,
+                                True,
+                                False,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                            ]
+                        }
                     ],
                 ),
                 dict(
@@ -882,7 +897,17 @@ fig.update_layout(
                     method="update",
                     args=[
                         {
-                            "visible": [True, True, False, True, True, True, True, True, True],
+                            "visible": [
+                                True,
+                                True,
+                                False,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                            ],
                             "opacity": [0.55, 0.80, 0.70, 1, 1, 1, 1, 1, 1],
                         }
                     ],
@@ -891,14 +916,38 @@ fig.update_layout(
                     label="Topografija",
                     method="update",
                     args=[
-                        {"visible": [True, False, False, True, True, True, True, True, True]}
+                        {
+                            "visible": [
+                                True,
+                                False,
+                                False,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                            ]
+                        }
                     ],
                 ),
                 dict(
                     label="Trusted Area",
                     method="update",
                     args=[
-                        {"visible": [False, True, True, True, True, True, True, True, True]}
+                        {
+                            "visible": [
+                                False,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                                True,
+                            ]
+                        }
                     ],
                 ),
             ],
@@ -908,9 +957,9 @@ fig.update_layout(
         text=(
             f"3D Terrain Navigation Map  |  {LAT_CENTER}N, {LON_CENTER}E<br>"
             f"<sup>"
-            f"Zlato = TRUST ROUTE ({route_dist[-1]:.0f}m, 100% pouzdana)  |  "
-            f"Ljubicasta = KNOWN ROUTE ({kroute_dist[-1]:.0f}m, ispitana)  |  "
-            f"Cyan = A* planer  |  Layer toggle gore lijevo"
+            f"Zlato = PATH 1 ({p1_dist[-1]:.0f}m, robot 100%)  |  "
+            f"Ljubicasta = PATH 2 ({p2_dist[-1]:.0f}m, robot 100%)  |  "
+            f"Rutiranje: klikni pinove na 2D panelu  |  Layer toggle gore lijevo"
             f"</sup>"
         ),
         x=0.5,
@@ -954,19 +1003,22 @@ fig.update_layout(
     height=800,
 )
 
+
 # ── 2D satelitski bočni panel + JS cursor koji prati 3D hover ────────────────
 def to_svg_pts(xs, ys):
     """Pretvara metre koordinate u SVG viewBox (0-100) koordinate."""
     pts = []
     for x, y in zip(xs, ys):
         svgx = (float(x) - float(x_m[0])) / (float(x_m[-1]) - float(x_m[0])) * 100
-        svgy = (1.0 - (float(y) - float(y_m[0])) / (float(y_m[-1]) - float(y_m[0]))) * 100
+        svgy = (
+            1.0 - (float(y) - float(y_m[0])) / (float(y_m[-1]) - float(y_m[0]))
+        ) * 100
         pts.append(f"{svgx:.2f},{svgy:.2f}")
     return " ".join(pts)
 
 
-trust_svg_pts = to_svg_pts(rx, ry)
-known_svg_pts = to_svg_pts(krx, kry)
+p1_svg_pts = to_svg_pts(p1x, p1y)
+p2_svg_pts = to_svg_pts(p2x, p2y)
 
 js_xmin = float(x_m[0])
 js_xmax = float(x_m[-1])
@@ -982,15 +1034,19 @@ if sat_b64:
     <div id="zoom-controls">
       <button id="btn-zoom-reset" title="Reset zoom (R)">&#8635; Reset</button>
       <button id="btn-follow" title="Auto-prati 3D kursor" class="active">&#128247; Prati</button>
+      <button id="btn-trust" title="Prikaži/sakrij Trusted Area sloj" class="active">&#128274; Trust</button>
       <span id="zoom-lbl">1.0x</span>
     </div>
     <div id="sat-container">
       <div id="sat-inner">
         <img id="sat-img" src="data:image/png;base64,{sat_b64}" alt="Satelitska snimka"/>
+        <img id="trust-overlay-img" src="data:image/png;base64,{trust_overlay_b64}"
+             alt="Trust overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;
+             pointer-events:none;image-rendering:pixelated;opacity:0.72;"/>
         <svg id="sat-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
-          <polyline points="{trust_svg_pts}" fill="none" stroke="gold" stroke-width="0.9"
+          <polyline points="{p1_svg_pts}" fill="none" stroke="gold" stroke-width="0.9"
                     stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
-          <polyline points="{known_svg_pts}" fill="none" stroke="mediumpurple" stroke-width="0.9"
+          <polyline points="{p2_svg_pts}" fill="none" stroke="mediumpurple" stroke-width="0.9"
                     stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
           <line id="cur-h" x1="0" y1="50" x2="100" y2="50"
                 stroke="red" stroke-width="0.5" stroke-opacity="0.65"
@@ -1006,16 +1062,40 @@ if sat_b64:
     </div>
     <div id="hover-info">Scroll = zoom &bull; Drag = pan</div>
     <div id="legend">
-      <div class="leg"><span class="leg-dot" style="background:gold"></span>TRUST ROUTE ({route_dist[-1]:.0f} m)</div>
-      <div class="leg"><span class="leg-dot" style="background:mediumpurple"></span>KNOWN ROUTE ({kroute_dist[-1]:.0f} m)</div>
+      <div class="leg"><span class="leg-dot" style="background:gold"></span>PATH 1 &ndash; robot ({p1_dist[-1]:.0f} m, 100%)</div>
+      <div class="leg"><span class="leg-dot" style="background:mediumpurple"></span>PATH 2 &ndash; robot ({p2_dist[-1]:.0f} m, 100%)</div>
       <hr class="leg-sep"/>
       <div class="leg-head">Trusted Area sloj:</div>
-      <div class="leg"><span class="leg-dot" style="background:rgb(30,144,255)"></span>100% &ndash; UGV potv&rcaron;en (trusted)</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(30,144,255)"></span>100% &ndash; UGV robot pro&scaron;ao</div>
+      <div class="leg"><span class="leg-dot" style="background:rgb(0,191,255)"></span>90% &ndash; Robot pro&scaron;ao, riskantan teren</div>
       <div class="leg"><span class="leg-dot" style="background:rgb(40,200,80)"></span>70% &ndash; Evaluirano s mape</div>
       <div class="leg"><span class="leg-dot" style="background:rgb(230,160,0)"></span>50% &ndash; &Scaron;uma / te&zcaron;e prohodan</div>
       <div class="leg"><span class="leg-dot" style="background:rgb(255,90,90)"></span>30% &ndash; Prekinut put / upozorenje</div>
       <div class="leg"><span class="leg-dot" style="background:rgb(139,0,0)"></span>0% &ndash; Apsolutna blokada</div>
     </div>
+    <hr class="leg-sep" style="margin-top:12px"/>
+    <div class="panel-title" style="margin-top:8px">&#128506; Rutiranje</div>
+    <div id="route-pin-mode">
+      <button id="btn-pin-start" class="pin-btn active">&#128205; Postavi Start</button>
+      <button id="btn-pin-end" class="pin-btn">&#127937; Postavi Kraj</button>
+    </div>
+    <div class="coord-row">
+      <span class="coord-lbl">Start:</span>
+      <input id="inp-sx" type="number" step="1" class="coord-inp" placeholder="X (m)"/>
+      <input id="inp-sy" type="number" step="1" class="coord-inp" placeholder="Y (m)"/>
+    </div>
+    <div class="coord-row">
+      <span class="coord-lbl">Kraj:</span>
+      <input id="inp-ex" type="number" step="1" class="coord-inp" placeholder="X (m)"/>
+      <input id="inp-ey" type="number" step="1" class="coord-inp" placeholder="Y (m)"/>
+    </div>
+    <div id="route-calc-btns">
+      <button id="btn-route-short" class="route-calc-btn">&#128207; Najkra&#263;a</button>
+      <button id="btn-route-fast" class="route-calc-btn">&#9889; Najbr&#382;a</button>
+      <button id="btn-route-safe" class="route-calc-btn">&#128737; Najsigurnija</button>
+      <button id="btn-route-clear" class="route-calc-btn clr-btn">&#10005; Obri&#353;i</button>
+    </div>
+    <div id="route-result">Klikni na satelitsku snimku za odabir ta&#269;aka.</div>
   </div>"""
 else:
     sat_panel_html = ""
@@ -1138,6 +1218,31 @@ full_html = f"""<!DOCTYPE html>
       border-top: 1px solid rgba(255,255,255,0.1);
       margin: 8px 0;
     }}
+    #route-pin-mode {{ display:flex; gap:6px; margin:6px 0 8px; }}
+    .pin-btn {{
+      flex:1; background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.18);
+      color:#ccc; font-size:10px; padding:4px 6px; border-radius:4px; cursor:pointer;
+    }}
+    .pin-btn.active {{ border-color:#00ff88; color:#00ff88; background:rgba(0,255,136,0.08); }}
+    .coord-row {{ display:flex; align-items:center; gap:4px; margin-bottom:5px; }}
+    .coord-lbl {{ font-size:10px; color:#888; width:32px; flex-shrink:0; }}
+    .coord-inp {{
+      flex:1; background:rgba(255,255,255,0.06); border:1px solid rgba(255,255,255,0.15);
+      color:#ddd; font-size:10px; padding:3px 5px; border-radius:3px; min-width:0;
+    }}
+    #route-calc-btns {{ display:grid; grid-template-columns:1fr 1fr; gap:5px; margin-top:6px; }}
+    .route-calc-btn {{
+      background:rgba(255,255,255,0.07); border:1px solid rgba(255,255,255,0.18);
+      color:#ccc; font-size:10px; padding:5px 4px; border-radius:4px; cursor:pointer; text-align:center;
+    }}
+    .route-calc-btn:hover {{ background:rgba(255,255,255,0.14); }}
+    .route-calc-btn.active {{ border-color:#1e90ff; color:#1e90ff; background:rgba(30,144,255,0.12); }}
+    .clr-btn {{ border-color:rgba(200,60,60,0.5) !important; color:#f98 !important; background:rgba(180,40,40,0.2) !important; }}
+    #route-result {{
+      margin-top:8px; font-size:11px; color:#aaa; line-height:1.7;
+      padding:7px 8px; background:rgba(0,0,0,0.3); border-radius:4px;
+      min-height:28px; border:1px solid rgba(255,255,255,0.07);
+    }}
   </style>
 </head>
 <body>
@@ -1225,6 +1330,16 @@ full_html = f"""<!DOCTYPE html>
         btnFollow.classList.toggle('active', zs.follow);
       }});
 
+      var btnTrust = document.getElementById('btn-trust');
+      var trustOverlay = document.getElementById('trust-overlay-img');
+      if (btnTrust && trustOverlay) {{
+        btnTrust.addEventListener('click', function() {{
+          var visible = trustOverlay.style.display !== 'none';
+          trustOverlay.style.display = visible ? 'none' : '';
+          btnTrust.classList.toggle('active', !visible);
+        }});
+      }}
+
       window.addEventListener('keydown', function(e) {{
         if (e.key === 'r' || e.key === 'R') {{
           zs.z = 1; zs.dx = 0; zs.dy = 0; applyTransform();
@@ -1273,6 +1388,273 @@ full_html = f"""<!DOCTYPE html>
 
       window.addEventListener('load', function () {{ setTimeout(attachHover, 500); }});
     }})();
+
+    // ── Interactive Routing Engine ─────────────────────────────────────────
+    window.addEventListener('load', function () {{
+      var GN         = {GRID_N};
+      var costData   = {_js_cost_data};
+      var trustData  = {_js_trust_data};
+      var elevData   = {_js_elev_data};
+      var xArr       = {_js_xarr_data};
+      var yArr       = {_js_yarr_data};
+      var xMin2=xArr[0], xMax2=xArr[GN-1], yMin2=yArr[0], yMax2=yArr[GN-1];
+      var cellW=(xMax2-xMin2)/(GN-1), cellH=(yMax2-yMin2)/(GN-1);
+
+      function cm(r,c){{return costData[r*GN+c]||0;}}
+      function tm(r,c){{return trustData[r*GN+c]||0;}}
+      function em(r,c){{return elevData[r*GN+c]||0;}}
+      function passable(r,c){{
+        if(r<0||r>=GN||c<0||c>=GN) return false;
+        if(tm(r,c)<=0.01) return false;
+        if(cm(r,c)>0.88&&tm(r,c)<0.85) return false;
+        return true;
+      }}
+      var D8=[[-1,0],[-1,1],[-1,-1],[1,0],[1,1],[1,-1],[0,-1],[0,1]];
+
+      // Binary min-heap
+      function Heap(){{this.h=[];}}
+      Heap.prototype.push=function(v){{
+        this.h.push(v);var i=this.h.length-1,p;
+        while(i>0){{p=(i-1)>>1;if(this.h[p][0]<=this.h[i][0])break;var t=this.h[p];this.h[p]=this.h[i];this.h[i]=t;i=p;}}
+      }};
+      Heap.prototype.pop=function(){{
+        var top=this.h[0],last=this.h.pop();
+        if(this.h.length>0){{
+          this.h[0]=last;var i=0,n=this.h.length;
+          for(;;){{var l=2*i+1,r2=2*i+2,m=i;if(l<n&&this.h[l][0]<this.h[m][0])m=l;if(r2<n&&this.h[r2][0]<this.h[m][0])m=r2;if(m===i)break;var t=this.h[m];this.h[m]=this.h[i];this.h[i]=t;i=m;}}
+        }}
+        return top;
+      }};
+      Heap.prototype.size=function(){{return this.h.length;}};
+
+      function astar(sr,sc,gr,gc,mode){{
+        var INF=1e18,N=GN*GN;
+        var g=new Float64Array(N).fill(INF);
+        var from=new Int32Array(N).fill(-1);
+        var closed=new Uint8Array(N);
+        var si=sr*GN+sc,gi=gr*GN+gc;
+        g[si]=0;
+        var heap=new Heap();
+        function h(r,c){{var dr=(r-gr)*cellH,dc=(c-gc)*cellW;return 0.08*Math.sqrt(dr*dr+dc*dc);}}
+        heap.push([h(sr,sc),sr,sc]);
+        while(heap.size()>0){{
+          var cur=heap.pop(),cr=cur[1],cc=cur[2],ci=cr*GN+cc;
+          if(closed[ci])continue; closed[ci]=1;
+          if(ci===gi)break;
+          for(var d=0;d<8;d++){{
+            var dr=D8[d][0],dc=D8[d][1],nr=cr+dr,nc=cc+dc;
+            if(!passable(nr,nc))continue;
+            var ni=nr*GN+nc; if(closed[ni])continue;
+            var dxy=Math.sqrt((dr*cellH)*(dr*cellH)+(dc*cellW)*(dc*cellW));
+            if(dxy<0.01)dxy=0.01;
+            var dh=Math.abs(em(nr,nc)-em(cr,cc));
+            var sl=Math.min(Math.atan(dh/dxy)*57.3/30,1.5);
+            var ng;
+            if(mode==='shortest'){{
+              ng=g[ci]+dxy;
+            }}else if(mode==='fastest'){{
+              ng=g[ci]+dxy*(cm(nr,nc)+sl*0.5+0.1);
+            }}else{{
+              ng=g[ci]+dxy*(2.0-tm(nr,nc))*(1+sl);
+            }}
+            if(ng<g[ni]){{g[ni]=ng;from[ni]=ci;heap.push([ng+h(nr,nc),nr,nc]);}}
+          }}
+        }}
+        if(g[gi]>=INF)return null;
+        var path=[],c2=gi;
+        while(c2!==si){{path.push([Math.floor(c2/GN),c2%GN]);c2=from[c2];if(c2<0)return null;}}
+        path.push([sr,sc]);return path.reverse();
+      }}
+
+      function pathStats(path){{
+        var dist=0,tsum=0,csum=0;
+        for(var i=0;i<path.length;i++){{
+          tsum+=tm(path[i][0],path[i][1]);
+          csum+=cm(path[i][0],path[i][1]);
+          if(i>0){{var dx=(path[i][1]-path[i-1][1])*cellW,dy=(path[i][0]-path[i-1][0])*cellH;dist+=Math.sqrt(dx*dx+dy*dy);}}
+        }}
+        var n=path.length||1;
+        var at=tsum/n, ac=csum/n;
+        var spd=Math.max(0.3,2.8*(1-0.5*ac)*(0.5+0.5*at));
+        return {{dist:dist,avgTrust:at,avgCost:ac,timeSec:dist/1000*3600/spd}};
+      }}
+
+      function worldToGrid2(wx,wy){{
+        var c=Math.round((wx-xArr[0])/(xArr[GN-1]-xArr[0])*(GN-1));
+        var r=Math.round((wy-yArr[0])/(yArr[GN-1]-yArr[0])*(GN-1));
+        return [Math.max(0,Math.min(GN-1,r)),Math.max(0,Math.min(GN-1,c))];
+      }}
+      function worldToSVG2(wx,wy){{
+        return {{sx:(wx-xMin2)/(xMax2-xMin2)*100,sy:(1-(wy-yMin2)/(yMax2-yMin2))*100}};
+      }}
+
+      // DOM refs
+      var satCont2=document.getElementById('sat-container');
+      var svgEl2=document.getElementById('sat-overlay');
+      var inpSx=document.getElementById('inp-sx'),inpSy=document.getElementById('inp-sy');
+      var inpEx=document.getElementById('inp-ex'),inpEy=document.getElementById('inp-ey');
+      var btnPinStart=document.getElementById('btn-pin-start');
+      var btnPinEnd=document.getElementById('btn-pin-end');
+      var btnShort=document.getElementById('btn-route-short');
+      var btnFast=document.getElementById('btn-route-fast');
+      var btnSafe=document.getElementById('btn-route-safe');
+      var btnClear2=document.getElementById('btn-route-clear');
+      var routeResult=document.getElementById('route-result');
+      if(!satCont2)return;
+
+      var startPt=null,endPt=null,placingMode='start',_routeCount=0;
+
+      function svgPin(id,cx,cy,color,label){{
+        var old=svgEl2.querySelector('#'+id);if(old)old.parentNode.removeChild(old);
+        var g=document.createElementNS('http://www.w3.org/2000/svg','g');g.setAttribute('id',id);
+        var ci=document.createElementNS('http://www.w3.org/2000/svg','circle');
+        ci.setAttribute('cx',cx);ci.setAttribute('cy',cy);ci.setAttribute('r','2.2');
+        ci.setAttribute('fill',color);ci.setAttribute('stroke','white');ci.setAttribute('stroke-width','0.5');
+        ci.setAttribute('vector-effect','non-scaling-stroke');
+        var tx=document.createElementNS('http://www.w3.org/2000/svg','text');
+        tx.setAttribute('x',cx+2.8);tx.setAttribute('y',cy-2.2);tx.setAttribute('fill',color);
+        tx.setAttribute('font-size','4.5');tx.setAttribute('font-weight','bold');
+        tx.setAttribute('vector-effect','non-scaling-stroke');tx.textContent=label;
+        g.appendChild(ci);g.appendChild(tx);svgEl2.appendChild(g);
+      }}
+      function removePin(id){{var old=svgEl2.querySelector('#'+id);if(old)old.parentNode.removeChild(old);}}
+
+      function clickToWorld(e){{
+        var rect=satCont2.getBoundingClientRect();
+        var cx2=e.clientX-rect.left,cy2=e.clientY-rect.top;
+        var inner=document.getElementById('sat-inner');
+        var tr=inner?inner.style.transform||'':"";
+        var m=tr.match(/translate\\(([-0-9.]+)px,([-0-9.]+)px\\)\\s*scale\\(([-0-9.]+)\\)/);
+        var dx=m?parseFloat(m[1]):0,dy=m?parseFloat(m[2]):0,sc=m?parseFloat(m[3]):1;
+        var fx=(cx2-dx)/sc/rect.width,fy=(cy2-dy)/sc/rect.height;
+        return {{x:xMin2+fx*(xMax2-xMin2),y:yMax2-fy*(yMax2-yMin2)}};
+      }}
+
+      function updatePinMode(){{
+        if(btnPinStart)btnPinStart.classList.toggle('active',placingMode==='start');
+        if(btnPinEnd)btnPinEnd.classList.toggle('active',placingMode==='end');
+      }}
+
+      // Drag detection — skip click if user panned
+      var _mdPos=null;
+      satCont2.addEventListener('mousedown',function(e){{_mdPos={{x:e.clientX,y:e.clientY}};}},true);
+      satCont2.addEventListener('click',function(e){{
+        if(_mdPos&&Math.hypot(e.clientX-_mdPos.x,e.clientY-_mdPos.y)>6)return;
+        var pt=clickToWorld(e),sp=worldToSVG2(pt.x,pt.y);
+        if(placingMode==='start'){{
+          startPt=pt;svgPin('pin-start',sp.sx,sp.sy,'#00ff88','S');
+          if(inpSx)inpSx.value=pt.x.toFixed(1);if(inpSy)inpSy.value=pt.y.toFixed(1);
+          placingMode='end';
+          if(routeResult)routeResult.innerHTML='Postavi krajnju ta&#269;ku &rarr; klikni E.';
+        }}else{{
+          endPt=pt;svgPin('pin-end',sp.sx,sp.sy,'#ff5555','E');
+          if(inpEx)inpEx.value=pt.x.toFixed(1);if(inpEy)inpEy.value=pt.y.toFixed(1);
+          placingMode='start';
+          if(routeResult)routeResult.innerHTML='Odaberi tip rute.';
+        }}
+        updatePinMode();
+      }});
+
+      // Manual coordinate input
+      function syncInputPins(){{
+        if(inpSx&&inpSx.value!==''&&inpSy&&inpSy.value!==''){{
+          startPt={{x:parseFloat(inpSx.value),y:parseFloat(inpSy.value)}};
+          var s=worldToSVG2(startPt.x,startPt.y);svgPin('pin-start',s.sx,s.sy,'#00ff88','S');
+        }}
+        if(inpEx&&inpEx.value!==''&&inpEy&&inpEy.value!==''){{
+          endPt={{x:parseFloat(inpEx.value),y:parseFloat(inpEy.value)}};
+          var e2=worldToSVG2(endPt.x,endPt.y);svgPin('pin-end',e2.sx,e2.sy,'#ff5555','E');
+        }}
+      }}
+      [inpSx,inpSy,inpEx,inpEy].forEach(function(inp){{if(inp)inp.addEventListener('change',syncInputPins);}});
+      if(btnPinStart)btnPinStart.addEventListener('click',function(){{placingMode='start';updatePinMode();}});
+      if(btnPinEnd)btnPinEnd.addEventListener('click',function(){{placingMode='end';updatePinMode();}});
+
+      // 3D route management
+      function clearRoute3D(){{
+        var gd=document.getElementById('plotly-3d');
+        if(!gd||!gd.data||_routeCount<1)return;
+        var idxs=[];for(var i=gd.data.length-_routeCount;i<gd.data.length;i++)idxs.push(i);
+        Plotly.deleteTraces(gd,idxs);_routeCount=0;
+      }}
+
+      function drawRoute(path,mode){{
+        var colors={{shortest:'#00ff88',fastest:'#ffd700',safest:'#00cfff'}};
+        var names={{shortest:'Najkra\u0107a ruta',fastest:'Najbr\u017ea ruta',safest:'Najsigurnija ruta'}};
+        var col=colors[mode]||'#fff',name=names[mode]||'Ruta';
+        var px=[],py=[],pz=[];
+        for(var i=0;i<path.length;i++){{
+          px.push(xArr[path[i][1]]);py.push(yArr[path[i][0]]);
+          pz.push(elevData[path[i][0]*GN+path[i][1]]+2.5);
+        }}
+        // SVG polyline
+        var old=svgEl2.querySelector('#route-line-svg');if(old)old.parentNode.removeChild(old);
+        var poly=document.createElementNS('http://www.w3.org/2000/svg','polyline');
+        poly.setAttribute('id','route-line-svg');
+        poly.setAttribute('points',px.map(function(x,i){{var s=worldToSVG2(x,py[i]);return s.sx.toFixed(2)+','+s.sy.toFixed(2);}}).join(' '));
+        poly.setAttribute('fill','none');poly.setAttribute('stroke',col);
+        poly.setAttribute('stroke-width','1.5');poly.setAttribute('stroke-opacity','0.95');
+        poly.setAttribute('vector-effect','non-scaling-stroke');
+        svgEl2.insertBefore(poly,svgEl2.firstChild);
+        // 3D
+        clearRoute3D();
+        var gd=document.getElementById('plotly-3d');if(!gd)return;
+        var n=px.length;
+        Plotly.addTraces(gd,[
+          {{type:'scatter3d',x:px,y:py,z:pz,mode:'lines',line:{{color:col,width:5}},name:name,hoverinfo:'skip'}},
+          {{type:'scatter3d',
+            x:[px[0],px[n-1]],y:[py[0],py[n-1]],z:[pz[0]+1.5,pz[n-1]+1.5],
+            mode:'markers+text',
+            marker:{{size:11,color:[col,'#ff8800'],symbol:'diamond',line:{{color:'white',width:1}}}},
+            text:['RUTA START','RUTA KRAJ'],textposition:'top center',
+            textfont:{{size:10,color:col}},name:name+' S/K',hoverinfo:'text'}}
+        ]);
+        _routeCount=2;
+      }}
+
+      function calcRoute(mode){{
+        if(!startPt||!endPt){{
+          if(routeResult)routeResult.innerHTML='<span style="color:#f88">Postavi startnu i krajnju ta&#269;ku.</span>';
+          return;
+        }}
+        var sg=worldToGrid2(startPt.x,startPt.y),eg=worldToGrid2(endPt.x,endPt.y);
+        if(!passable(sg[0],sg[1])){{if(routeResult)routeResult.innerHTML='<span style="color:#f88">&#9888; Start je na neprolaznom terenu!</span>';return;}}
+        if(!passable(eg[0],eg[1])){{if(routeResult)routeResult.innerHTML='<span style="color:#f88">&#9888; Kraj je na neprolaznom terenu!</span>';return;}}
+        if(routeResult)routeResult.innerHTML='<i style="color:#888">Ra&#269;unam A*...</i>';
+        [btnShort,btnFast,btnSafe].forEach(function(b){{if(b)b.classList.remove('active');}});
+        var ab={{shortest:btnShort,fastest:btnFast,safest:btnSafe}}[mode];
+        if(ab)ab.classList.add('active');
+        setTimeout(function(){{
+          var path=astar(sg[0],sg[1],eg[0],eg[1],mode);
+          if(!path){{if(routeResult)routeResult.innerHTML='<span style="color:#f88">&#9888; Nema dostupne rute.</span>';return;}}
+          var st=pathStats(path);
+          var mm=Math.floor(st.timeSec/60),ss=Math.round(st.timeSec%60);
+          var mn={{shortest:'Najkra\u0107a',fastest:'Najbr\u017ea',safest:'Najsigurnija'}};
+          if(routeResult)routeResult.innerHTML=
+            '<b style="color:#ddd">'+mn[mode]+':</b><br>'+
+            '&#128207; Du\u017eina: <b>'+st.dist.toFixed(0)+'m</b>&emsp;'+
+            '&#9201; Procjena: <b>'+mm+'min '+ss+'s</b><br>'+
+            '&#128737; Prosj. trust: <b>'+(st.avgTrust*100).toFixed(0)+'%</b>&emsp;'+
+            '&#128200; To&#269;ke: <b>'+path.length+'</b>';
+          drawRoute(path,mode);
+        }},10);
+      }}
+
+      if(btnShort)btnShort.addEventListener('click',function(){{calcRoute('shortest');}});
+      if(btnFast)btnFast.addEventListener('click',function(){{calcRoute('fastest');}});
+      if(btnSafe)btnSafe.addEventListener('click',function(){{calcRoute('safest');}});
+
+      if(btnClear2)btnClear2.addEventListener('click',function(){{
+        startPt=null;endPt=null;
+        removePin('pin-start');removePin('pin-end');
+        var old=svgEl2.querySelector('#route-line-svg');if(old)old.parentNode.removeChild(old);
+        [inpSx,inpSy,inpEx,inpEy].forEach(function(i){{if(i)i.value='';}});
+        if(routeResult)routeResult.innerHTML='Klikni na satelitsku snimku za odabir ta&#269;aka.';
+        clearRoute3D();
+        [btnShort,btnFast,btnSafe].forEach(function(b){{if(b)b.classList.remove('active');}});
+        placingMode='start';updatePinMode();
+      }});
+    }});
   </script>
 </body>
 </html>"""
@@ -1297,77 +1679,67 @@ ax.plot_surface(
     XX, YY, elev_s, facecolors=colors, linewidth=0, antialiased=True, alpha=0.88
 )
 
-# A* putanja
-if path:
-    px2 = [float(x_m[c]) for r, c in path]
-    py2 = [float(y_m[r]) for r, c in path]
-    pz2 = [float(elev_s[r, c]) + 3 for r, c in path]
-    ax.plot(px2, py2, pz2, color="cyan", lw=2, zorder=10, label="A* Putanja")
-    ax.scatter([px2[0]], [py2[0]], [pz2[0]], color="lime", s=80, zorder=11)
-    ax.scatter([px2[-1]], [py2[-1]], [pz2[-1]], color="red", s=80, zorder=11)
-
-# TRUST ROUTE
-sc_colors = plt.cm.YlOrRd(np.linspace(0, 1, len(rx)))
-for i in range(len(rx) - 1):
+# PATH 1
+for i in range(len(p1x) - 1):
     ax.plot(
-        [rx[i], rx[i + 1]],
-        [ry[i], ry[i + 1]],
-        [rz[i], rz[i + 1]],
+        [p1x[i], p1x[i + 1]],
+        [p1y[i], p1y[i + 1]],
+        [p1z[i], p1z[i + 1]],
         color="gold",
         lw=2.5,
         zorder=12,
     )
 ax.scatter(
-    [rx[0]],
-    [ry[0]],
-    [rz[0] + 1],
+    [p1x[0]],
+    [p1y[0]],
+    [p1z[0] + 1],
     color="gold",
     s=120,
     marker="D",
     zorder=13,
-    label="Robot START",
+    label="P1 START",
 )
 ax.scatter(
-    [rx[-1]],
-    [ry[-1]],
-    [rz[-1] + 1],
+    [p1x[-1]],
+    [p1y[-1]],
+    [p1z[-1] + 1],
     color="orange",
     s=120,
     marker="D",
     zorder=13,
-    label="Robot KRAJ",
+    label="P1 KRAJ",
 )
 
-# KNOWN ROUTE
-if len(krx) > 0:
-    for i in range(len(krx) - 1):
+# PATH 2
+if len(p2x) > 0:
+    for i in range(len(p2x) - 1):
         ax.plot(
-            [krx[i], krx[i + 1]],
-            [kry[i], kry[i + 1]],
-            [krz[i], krz[i + 1]],
+            [p2x[i], p2x[i + 1]],
+            [p2y[i], p2y[i + 1]],
+            [p2z[i], p2z[i + 1]],
             color="mediumpurple",
             lw=2.0,
             zorder=11,
         )
     ax.scatter(
-        [krx[0]],
-        [kry[0]],
-        [krz[0] + 1],
+        [p2x[0]],
+        [p2y[0]],
+        [p2z[0] + 1],
         color="mediumpurple",
         s=120,
         marker="s",
         zorder=13,
-        label="Known START",
+        label="P2 START",
     )
     ax.scatter(
-        [krx[-1]],
-        [kry[-1]],
-        [krz[-1] + 1],
+        [p2x[-1]],
+        [p2y[-1]],
+        [p2z[-1] + 1],
         color="violet",
         s=120,
         marker="s",
         zorder=13,
-        label="Known KRAJ",
+        label="P2 KRAJ",
     )
 
 ax.set_xlabel("Istok-Zapad (m)", color="white", labelpad=8)
@@ -1375,7 +1747,7 @@ ax.set_ylabel("Sjever-Jug (m)", color="white", labelpad=8)
 ax.set_zlabel("Visina (m)", color="white", labelpad=8)
 ax.tick_params(colors="white")
 ax.set_title(
-    f"3D Terrain Map  |  Trust ({route_dist[-1]:.0f}m) + Known ({kroute_dist[-1]:.0f}m)  |  A*\n"
+    f"3D Terrain Map  |  PATH 1 ({p1_dist[-1]:.0f}m) + PATH 2 ({p2_dist[-1]:.0f}m)\n"
     f"{LAT_CENTER}N {LON_CENTER}E  |  Elev: {elev_s.min():.0f}–{elev_s.max():.0f}m",
     color="white",
     fontsize=12,
@@ -1415,82 +1787,150 @@ plt.savefig(OUT_PNG, dpi=150, bbox_inches="tight", facecolor="#08080e")
 plt.close(fig2)
 print(f"Statican PNG: {OUT_PNG}")
 
-# ── 8. Trust DB (JSON) ───────────────────────────────────────────────────────
-# Baza povjerenja koja se moze azurirati putem API-ja ili JSON fajlova.
+# ── 8. Trust DB (JSONL) ──────────────────────────────────────────────────────
+# Baza povjerenja u JSONL formatu (jedan JSON objekat po liniji).
 # Schema:
-#   schema_version  — int, povecava se pri lomljivim promjenama strukture
-#   generated_at    — ISO 8601 UTC timestamp
-#   area            — centar i raspon mape u GPS + UTM koordinatama
-#   sessions        — lista ucitanih JSONL sesija sa nivoom povjerenja
-#   manual_zones    — rucno dodane zone (prazna lista, popunjava API/JSON)
-#   points          — sve GPS tocke sa UTM koordinatama i trust levelom
+#   Linija 1 (meta):  {"type":"meta", "schema_version":2, ...}
+#   Ostale linije:    {"type":"point", "easting":..., "northing":...,
+#                      "altitude":..., "trust":..., "speed_kmh":...,
+#                      "risky":bool, "session_id":..., "timestamp":...}
+#
+# Deduplication: segment kljuc = (round(easting), round(northing)) ≈ 1m celija
+#   - novi unos  → dodaje se red
+#   - isti 1m kljuc vec postoji → azurira se samo speed_kmh
+#
+# Trust logika pri generisanju:
+#   1.0  — robot prosao, teren normalan (cost_map <= 0.88)
+#   0.9  — robot prosao kroz crvenu zonu (cost_map > 0.88), nije rucno
+#           potvrdjeno kao blokada → riskantan segment
+#   2.0  — rucno potvrdjeno: apsolutna blokada (manual_zones, nikad iz GPS)
 import datetime as _dt
 
-_trust_db_path = os.path.join(MAPS_DIR, "trust_db.json")
-print("\nGenerisem trust_db.json...")
+_trust_db_path = os.path.join(MAPS_DIR, "trust_db.jsonl")
+print("\nGenerisem trust_db.jsonl...")
 
-_trust_sid = os.path.basename(JSONL_TRUST).replace(".jsonl", "")
-_known_sid = os.path.basename(JSONL_KNOWN).replace(".jsonl", "")
+_p1_sid = os.path.basename(JSONL_PATH1).replace(".jsonl", "")
+_p2_sid = os.path.basename(JSONL_PATH2).replace(".jsonl", "")
 
 _sessions = [
     {
-        "id": _trust_sid,
-        "file": JSONL_TRUST,
+        "id": _p1_sid,
+        "file": JSONL_PATH1,
         "trust_level": 1.0,
-        "label": "TRUST ROUTE – UGV potvrdio prolaz",
-        "n_points": len(route_x),
+        "label": "PATH 1 – robot 100% provjereno",
+        "n_points": len(p1_x),
     },
     {
-        "id": _known_sid,
-        "file": JSONL_KNOWN,
-        "trust_level": 0.70,
-        "label": "KNOWN ROUTE – ispitano, nije vozeno",
-        "n_points": len(kroute_x),
+        "id": _p2_sid,
+        "file": JSONL_PATH2,
+        "trust_level": 1.0,
+        "label": "PATH 2 – robot 100% provjereno",
+        "n_points": len(p2_x),
     },
 ]
 
-_points = []
-for _x, _y, _alt, _ts in zip(route_x, route_y, route_z, route_ts):
-    _points.append({
-        "easting":  round(float(_x) + UTM_E_CENTER, 3),
-        "northing": round(float(_y) + UTM_N_CENTER, 3),
-        "altitude": round(float(_alt), 2),
-        "trust":    1.0,
-        "session_id": _trust_sid,
-        "timestamp": _ts,
-    })
-for _x, _y, _alt, _ts in zip(kroute_x, kroute_y, kroute_z, kroute_ts):
-    _points.append({
-        "easting":  round(float(_x) + UTM_E_CENTER, 3),
-        "northing": round(float(_y) + UTM_N_CENTER, 3),
-        "altitude": round(float(_alt), 2),
-        "trust":    0.70,
-        "session_id": _known_sid,
-        "timestamp": _ts,
-    })
+# ── Ucitaj postojeci trust_db.jsonl radi deduplicacije ──────────────────────
+_seg_index = {}  # seg_key → entry dict
+_manual_zones = []  # sacuvaj rucne zone iz prethodnog fajla
+_manual_block_keys = set()  # seg_key celija rucno potvrdjenih kao blokada (trust>=2)
 
-_trust_db = {
-    "schema_version": 1,
+if os.path.exists(_trust_db_path):
+    with open(_trust_db_path, encoding="utf-8") as _ef:
+        for _eln in _ef:
+            _eln = _eln.strip()
+            if not _eln:
+                continue
+            try:
+                _eobj = json.loads(_eln)
+            except Exception:
+                continue
+            if _eobj.get("type") == "meta":
+                _manual_zones = _eobj.get("manual_zones", [])
+                for _mz in _manual_zones:
+                    if float(_mz.get("trust", 0)) >= 2.0:
+                        _mk = (round(_mz["easting"]), round(_mz["northing"]))
+                        _manual_block_keys.add(_mk)
+            elif _eobj.get("type") == "point":
+                _sk = (round(_eobj["easting"]), round(_eobj["northing"]))
+                _seg_index[_sk] = _eobj
+
+
+# ── Helper: da li je GPS tocka na blokiranom terenu (cost_map > 0.88)? ──────
+def _is_risky_terrain(x_rel, y_rel):
+    """Vraca True ako cost_map na toj lokaciji > 0.88 (crvena/blokirana zona)."""
+    col = (
+        (float(x_rel) - float(x_m[0])) / (float(x_m[-1]) - float(x_m[0])) * (GRID_N - 1)
+    )
+    row = (
+        (float(y_rel) - float(y_m[0])) / (float(y_m[-1]) - float(y_m[0])) * (GRID_N - 1)
+    )
+    col_i = int(np.clip(round(col), 0, GRID_N - 1))
+    row_i = int(np.clip(round(row), 0, GRID_N - 1))
+    return float(cost_map[row_i, col_i]) > 0.88
+
+
+# ── Izgradi/azuriraj indeks segmenata ────────────────────────────────────────
+_risky_count = 0
+_updated_count = 0
+_new_count = 0
+
+for _path_data in [
+    (p1_x, p1_y, p1_z, p1_spd, p1_ts, _p1_sid),
+    (p2_x, p2_y, p2_z, p2_spd, p2_ts, _p2_sid),
+]:
+    _xs, _ys, _alts, _spds, _tss, _sid = _path_data
+    for _x, _y, _alt, _spd, _ts in zip(_xs, _ys, _alts, _spds, _tss):
+        _e = round(float(_x) + UTM_E_CENTER, 3)
+        _n = round(float(_y) + UTM_N_CENTER, 3)
+        _sk = (round(_e), round(_n))
+        _risky = _is_risky_terrain(_x, _y) and _sk not in _manual_block_keys
+        _trust = 0.9 if _risky else 1.0
+        if _risky:
+            _risky_count += 1
+        if _sk in _seg_index:
+            # Segment vec postoji — samo azuriraj brzinu
+            _seg_index[_sk]["speed_kmh"] = round(float(_spd), 2)
+            _updated_count += 1
+        else:
+            _seg_index[_sk] = {
+                "type": "point",
+                "easting": _e,
+                "northing": _n,
+                "altitude": round(float(_alt), 2),
+                "trust": _trust,
+                "speed_kmh": round(float(_spd), 2),
+                "risky": _risky,
+                "session_id": _sid,
+                "timestamp": _ts,
+            }
+            _new_count += 1
+
+# ── Zapisi JSONL ─────────────────────────────────────────────────────────────
+_meta_obj = {
+    "type": "meta",
+    "schema_version": 2,
     "generated_at": _dt.datetime.now(_dt.timezone.utc).isoformat(),
     "area": {
-        "lat_center":   round(LAT_CENTER, 7),
-        "lon_center":   round(LON_CENTER, 7),
+        "lat_center": round(LAT_CENTER, 7),
+        "lon_center": round(LON_CENTER, 7),
         "utm_e_center": round(UTM_E_CENTER, 2),
         "utm_n_center": round(UTM_N_CENTER, 2),
-        "utm_zone":     "32N",
-        "lat_span":     LAT_SPAN,
-        "lon_span":     LON_SPAN,
+        "utm_zone": "32N",
+        "lat_span": LAT_SPAN,
+        "lon_span": LON_SPAN,
     },
     "sessions": _sessions,
-    "manual_zones": [],
-    "points": _points,
+    "manual_zones": _manual_zones,
 }
 
 with open(_trust_db_path, "w", encoding="utf-8") as _f:
-    json.dump(_trust_db, _f, ensure_ascii=False, indent=2)
+    _f.write(json.dumps(_meta_obj, ensure_ascii=False) + "\n")
+    for _entry in _seg_index.values():
+        _f.write(json.dumps(_entry, ensure_ascii=False) + "\n")
+
 print(
-    f"  trust_db.json: {len(_points)} tocaka  "
-    f"({_sessions[0]['n_points']} TRUST 100% + {_sessions[1]['n_points']} KNOWN 70%)"
+    f"  trust_db.jsonl: {len(_seg_index)} jedinstvenih segmenata  "
+    f"({_new_count} novih, {_updated_count} azuriranih, {_risky_count} riskantan prolaz (trust=0.9))"
 )
 print(f"  Lokacija: {_trust_db_path}")
 
