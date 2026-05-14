@@ -38,6 +38,7 @@ _META_CURR = {
     "lon": round(LON_CENTER, 6),
     "lat_span": LAT_SPAN,
     "lon_span": LON_SPAN,
+    "grid_n": GRID_N,  # invalidate cache when resolution changes
 }
 
 # Internal grid (set after build_grid())

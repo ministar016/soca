@@ -168,7 +168,7 @@ def compute_trust_map(
         if (labeled == cid).sum() < 5:
             trust[labeled == cid] = 0.30
 
-    # GPS routes — raise trust in a ±1 cell buffer around each point
+    # GPS routes — raise trust in a ±1 cell buffer around each point (~4m cell → ~12m corridor)
     robot_mask = np.zeros((GRID_N, GRID_N), dtype=bool)
     for spec in route_specs:
         t_level = float(spec["trust"])

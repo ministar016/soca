@@ -12,6 +12,7 @@ import base64
 import io
 import json
 import os
+import sys
 import time
 
 import cv2
@@ -19,6 +20,12 @@ import numpy as np
 import requests
 
 MAPS_DIR = "/home/mn/soca/bazel_workspace/Maps"
+
+# soca_map package lives alongside this script
+if MAPS_DIR not in sys.path:
+    sys.path.insert(0, MAPS_DIR)
+from soca_map.segmentation import segment_image as _segment_image  # noqa: E402
+
 IMG_PATH = os.path.join(MAPS_DIR, "image.png")
 JSONL_PATH1 = os.path.join(MAPS_DIR, "10.9.0.50_2026-05-08_12-10-46_UTC.jsonl")
 JSONL_PATH2 = os.path.join(MAPS_DIR, "10.9.0.50_2026-05-08_09-51-50_UTC.jsonl")
@@ -38,8 +45,37 @@ if os.path.exists(_api_key_file):
                 break
 OT_API_KEY = OT_API_KEY or os.environ.get("OT_API_KEY", "")
 
-GRID_N = 60  # grid rezolucija (celija po osi)
+GRID_N = 180  # grid rezolucija (celija po osi)
 _SAT_MARGIN = 1.5  # 50% margine oko GPS bounding boxa za satelitsku/DEM tile
+
+# ── CLI parametar: lat,lon[,ZOOMz]  npr.  49.7619516,6.717021,14.62z ────────
+import argparse as _argparse
+
+_ap = _argparse.ArgumentParser(add_help=False)
+_ap.add_argument(
+    "coords",
+    nargs="?",
+    default=None,
+    help="lat,lon[,ZOOMz]  e.g.  49.7619516,6.717021,14.62z",
+)
+_ap.add_argument(
+    "--label",
+    dest="labels",
+    action="append",
+    default=[],
+    metavar="LAT,LON:Naziv",
+    help="Dodaj oznaku na mapu, npr. --label 49.762,6.718:Moja_tacka",
+)
+_CLI, _ = _ap.parse_known_args()
+MANUAL_MODE = _CLI.coords is not None
+
+# MANUAL_LABELS = list of (easting, northing, text)
+MANUAL_LABELS = []
+for _lbl in _CLI.labels:
+    _lbl_parts = _lbl.split(":")
+    _lbl_text = _lbl_parts[1].replace("_", " ") if len(_lbl_parts) > 1 else "?"
+    _lbl_ll = _lbl_parts[0].split(",")
+    MANUAL_LABELS.append((_lbl_ll[0].strip(), _lbl_ll[1].strip(), _lbl_text))
 
 
 # ── UTM Zone 32N ↔ WGS84 konverzija ─────────────────────────────────────────
@@ -99,23 +135,93 @@ def _gps_bounds_from_jsonl(paths):
 
 
 # ── Auto-compute map bounds iz GPS podataka ──────────────────────────────────
-_e_min, _e_max, _n_min, _n_max = _gps_bounds_from_jsonl([JSONL_PATH1, JSONL_PATH2])
-UTM_E_CENTER = (_e_min + _e_max) / 2
-UTM_N_CENTER = (_n_min + _n_max) / 2
-LAT_CENTER, LON_CENTER = _utm32n_to_latlon(UTM_E_CENTER, UTM_N_CENTER)
 
-# Span = GPS bbox * SAT_MARGIN (margina za kontekst oko ruta)
-_cos_lat = _math.cos(_math.radians(LAT_CENTER))
-_lat_half = (_n_max - _n_min) / 2 / 111320 * _SAT_MARGIN
-_lon_half = (_e_max - _e_min) / 2 / (111320 * _cos_lat) * _SAT_MARGIN
-LAT_SPAN = round(_lat_half * 2, 5)
-LON_SPAN = round(_lon_half * 2, 5)
 
-print(f"Auto MAP centar: {LAT_CENTER:.6f}N, {LON_CENTER:.6f}E")
-print(
-    f"Auto MAP span:   LAT={LAT_SPAN:.5f}° ({LAT_SPAN*111320:.0f}m)  "
-    f"LON={LON_SPAN:.5f}° ({LON_SPAN*111320*_cos_lat:.0f}m)"
-)
+def _latlon_to_utm32n(lat_deg, lon_deg):
+    """WGS84 → UTM Zone 32N (easting, northing)."""
+    a = 6378137.0
+    f = 1 / 298.257223563
+    e2 = 2 * f - f * f
+    k0, E0 = 0.9996, 500000.0
+    lon0 = _math.radians(9.0)
+    lat = _math.radians(lat_deg)
+    lon = _math.radians(lon_deg)
+    N = a / _math.sqrt(1 - e2 * _math.sin(lat) ** 2)
+    T = _math.tan(lat) ** 2
+    C = e2 / (1 - e2) * _math.cos(lat) ** 2
+    A = (lon - lon0) * _math.cos(lat)
+    e4, e6 = e2 * e2, e2 * e2 * e2
+    M = a * (
+        (1 - e2 / 4 - 3 * e4 / 64 - 5 * e6 / 256) * lat
+        - (3 * e2 / 8 + 3 * e4 / 32 + 45 * e6 / 1024) * _math.sin(2 * lat)
+        + (15 * e4 / 256 + 45 * e6 / 1024) * _math.sin(4 * lat)
+        - (35 * e6 / 3072) * _math.sin(6 * lat)
+    )
+    ep2 = e2 / (1 - e2)
+    easting = (
+        k0
+        * N
+        * (
+            A
+            + (1 - T + C) * A**3 / 6
+            + (5 - 18 * T + T * T + 72 * C - 58 * ep2) * A**5 / 120
+        )
+        + E0
+    )
+    northing = k0 * (
+        M
+        + N
+        * _math.tan(lat)
+        * (
+            A**2 / 2
+            + (5 - T + 9 * C + 4 * C * C) * A**4 / 24
+            + (61 - 58 * T + T * T + 600 * C - 330 * ep2) * A**6 / 720
+        )
+    )
+    return easting, northing
+
+
+if MANUAL_MODE:
+    _parts = _CLI.coords.rstrip("z").split(",")
+    LAT_CENTER = float(_parts[0])
+    LON_CENTER = float(_parts[1])
+    _zoom = float(_parts[2]) if len(_parts) > 2 else 14.0
+    # Google Maps tile formula: mpp = 156543 * cos(lat) / 2^zoom ; span = mpp * 1024px
+    _mpp = 156543.03392 * _math.cos(_math.radians(LAT_CENTER)) / (2.0**_zoom)
+    _span_m = _mpp * 1024
+    _cos_lat = _math.cos(_math.radians(LAT_CENTER))
+    LAT_SPAN = round(_span_m / 111320, 5)
+    LON_SPAN = round(_span_m / (111320 * _cos_lat), 5)
+    UTM_E_CENTER, UTM_N_CENTER = _latlon_to_utm32n(LAT_CENTER, LON_CENTER)
+    print(
+        f"MANUELNI centar: {LAT_CENTER}°N {LON_CENTER}°E  zoom={_zoom}  span≈{_span_m:.0f}m"
+    )
+    print(f"  LAT_SPAN={LAT_SPAN:.5f}°  LON_SPAN={LON_SPAN:.5f}°")
+else:
+    _e_min, _e_max, _n_min, _n_max = _gps_bounds_from_jsonl([JSONL_PATH1, JSONL_PATH2])
+    UTM_E_CENTER = (_e_min + _e_max) / 2
+    UTM_N_CENTER = (_n_min + _n_max) / 2
+    LAT_CENTER, LON_CENTER = _utm32n_to_latlon(UTM_E_CENTER, UTM_N_CENTER)
+    _cos_lat = _math.cos(_math.radians(LAT_CENTER))
+    _lat_half = (_n_max - _n_min) / 2 / 111320 * _SAT_MARGIN
+    _lon_half = (_e_max - _e_min) / 2 / (111320 * _cos_lat) * _SAT_MARGIN
+    LAT_SPAN = round(_lat_half * 2, 5)
+    LON_SPAN = round(_lon_half * 2, 5)
+    print(f"Auto MAP centar: {LAT_CENTER:.6f}N, {LON_CENTER:.6f}E")
+    print(
+        f"Auto MAP span:   LAT={LAT_SPAN:.5f}° ({LAT_SPAN*111320:.0f}m)  "
+        f"LON={LON_SPAN:.5f}° ({LON_SPAN*111320*_cos_lat:.0f}m)"
+    )
+
+# Pretvori MANUAL_LABELS lat/lon stringove → UTM metre (after UTM_E/N_CENTER definisano)
+_resolved_labels = []
+for _ll_lat, _ll_lon, _ll_text in MANUAL_LABELS:
+    _le, _ln = _latlon_to_utm32n(float(_ll_lat), float(_ll_lon))
+    _lx = _le - UTM_E_CENTER
+    _ly = _ln - UTM_N_CENTER
+    _resolved_labels.append((_lx, _ly, _ll_text))
+MANUAL_LABELS = _resolved_labels
+
 
 # ── Invalidiraj satelitski cache ako se centar promijenio ───────────────────
 _sat_meta_path = os.path.join(MAPS_DIR, "satellite_meta.json")
@@ -177,6 +283,7 @@ def fetch_elevation_grid():
         "lon": round(LON_CENTER, 6),
         "lat_span": LAT_SPAN,
         "lon_span": LON_SPAN,
+        "grid_n": GRID_N,  # invalidate cache when resolution changes
     }
     if os.path.exists(_elev_meta_path):
         with open(_elev_meta_path) as _mf:
@@ -310,19 +417,24 @@ def _read_gps_alt(jsonl_path):
     return np.array(alts), np.array(xs), np.array(ys)
 
 
-gps_alt_1, gps_x_1, gps_y_1 = _read_gps_alt(JSONL_PATH1)
-gps_alt_2, gps_x_2, gps_y_2 = _read_gps_alt(JSONL_PATH2)
-all_gps_alt = np.concatenate([gps_alt_1, gps_alt_2])
-all_gps_x = np.concatenate([gps_x_1, gps_x_2])
-all_gps_y = np.concatenate([gps_y_1, gps_y_2])
+if MANUAL_MODE:
+    DEM_OFFSET = 0.0
+    print("DEM kalibracija: preskocena (manuelni mode, offset=0.0m)")
+else:
+    gps_alt_1, gps_x_1, gps_y_1 = _read_gps_alt(JSONL_PATH1)
+    gps_alt_2, gps_x_2, gps_y_2 = _read_gps_alt(JSONL_PATH2)
+    all_gps_alt = np.concatenate([gps_alt_1, gps_alt_2])
+    all_gps_x = np.concatenate([gps_x_1, gps_x_2])
+    all_gps_y = np.concatenate([gps_y_1, gps_y_2])
 
-dem_at_gps = _dem_at_xy(all_gps_x, all_gps_y)
-DEM_OFFSET = float(np.median(all_gps_alt) - np.median(dem_at_gps))
+    dem_at_gps = _dem_at_xy(all_gps_x, all_gps_y)
+    DEM_OFFSET = float(np.median(all_gps_alt) - np.median(dem_at_gps))
+    print(
+        f"DEM kalibracija: offset={DEM_OFFSET:+.1f}m  "
+        f"(DEM median={np.median(dem_at_gps)-DEM_OFFSET:.1f}m → GPS median={np.median(all_gps_alt):.1f}m)"
+    )
+
 elev_s = elev_s + DEM_OFFSET  # kalibriran DEM
-print(
-    f"DEM kalibracija: offset={DEM_OFFSET:+.1f}m  "
-    f"(DEM median={np.median(dem_at_gps)-DEM_OFFSET:.1f}m → GPS median={np.median(all_gps_alt):.1f}m)"
-)
 print(f"Elevacija (kalibrirano): {elev_s.min():.1f}-{elev_s.max():.1f}m")
 
 # UGV telemetrija: antena je ~0.5m iznad tla, vizualni offset 1.5m
@@ -337,22 +449,16 @@ def snap_to_terrain(xs, ys):
 
 # ── 2. Traversability mapa ───────────────────────────────────────────────────
 def compute_traversability(img_path):
+    """Segmentira sliku koristeći soca_map HSV+K-Means klasifikator."""
     img_bgr = cv2.imread(img_path)
     if img_bgr is None:
+        print(f"  [WARN] Ne mogu citati sliku: {img_path} — fallback 0.3")
         return np.full((GRID_N, GRID_N), 0.3, dtype=np.float32)
-    hsv = cv2.GaussianBlur(cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV), (5, 5), 0)
-    h, w = hsv.shape[:2]
-    cost = np.full((h, w), 0.4, dtype=np.float32)
-    cost[cv2.inRange(hsv, (0, 0, 90), (180, 45, 220)) > 0] = 0.10  # kamen
-    cost[cv2.inRange(hsv, (8, 25, 60), (28, 255, 255)) > 0] = 0.15  # zemlja
-    cost[cv2.inRange(hsv, (28, 20, 100), (40, 140, 255)) > 0] = 0.15
-    cost[cv2.inRange(hsv, (30, 40, 20), (90, 255, 200)) > 0] = 0.55  # vegetacija
-    cost[cv2.inRange(hsv, (90, 50, 20), (130, 255, 220)) > 0] = 0.95  # voda
-    cost[cv2.inRange(hsv, (0, 0, 0), (180, 255, 55)) > 0] = 0.70  # tamno
+    _, cost, _, _ = _segment_image(img_bgr)
     return cv2.resize(cost, (GRID_N, GRID_N), interpolation=cv2.INTER_AREA)
 
 
-cost_map = compute_traversability(IMG_PATH)
+# cost_map se racuna NAKON fetch_satellite_tile (vidi ispod) — koristi sat tile
 
 
 def compute_trust_map(c_map, route_specs):
@@ -392,7 +498,7 @@ def compute_trust_map(c_map, route_specs):
         if (labeled == comp_id).sum() < 5:
             trust[labeled == comp_id] = 0.30
 
-    # GPS rute → nivo povjerenja prema specifikaciji (buffer ±1 celija)
+    # GPS rute → nivo povjerenja prema specifikaciji (buffer ±1 celija, ~4m celija = ~12m koridor)
     robot_mask = np.zeros((GRID_N, GRID_N), dtype=bool)
     for spec in route_specs:
         t_level = float(spec["trust"])
@@ -506,6 +612,15 @@ def fetch_satellite_tile():
 
 sat_surf_color, sat_colorscale, sat_b64 = fetch_satellite_tile()
 
+# ── Traversability (koristi satelitsku sliku koja je sada dostupna) ──────────
+_sat_tile_path = os.path.join(MAPS_DIR, "satellite_tile.png")
+cost_map = compute_traversability(
+    _sat_tile_path if os.path.exists(_sat_tile_path) else IMG_PATH
+)
+print(
+    f"  Traversability: {(cost_map > 0.88).sum()} blocked / {(cost_map < 0.4).sum()} free cells"
+)
+
 
 # ── 4. JSONL GPS ruta (UTM → metre relativno od centra) ──────────────────────
 def load_trust_route(jsonl_path):
@@ -551,27 +666,38 @@ def load_trust_route(jsonl_path):
     return route_x, route_y, route_z, route_spd, route_dist, route_ts
 
 
-p1_x, p1_y, p1_z, p1_spd, p1_dist, p1_ts = load_trust_route(JSONL_PATH1)
-
-# Downsample PATH 1
 STEP = 5
-p1x = p1_x[::STEP]
-p1y = p1_y[::STEP]
-p1z = snap_to_terrain(p1x, p1y)
-p1s = p1_spd[::STEP]
-p1d = p1_dist[::STEP]
-p1t = p1_ts[::STEP]
-
-# ── PATH 2 (09-51-50) ───────────────────────────────────────────────────────
-print("")
-p2_x, p2_y, p2_z, p2_spd, p2_dist, p2_ts = load_trust_route(JSONL_PATH2)
 KSTEP = 8
-p2x = p2_x[::KSTEP]
-p2y = p2_y[::KSTEP]
-p2z = snap_to_terrain(p2x, p2y)
-p2s = p2_spd[::KSTEP]
-p2d = p2_dist[::KSTEP]
-p2t = p2_ts[::KSTEP]
+
+if not MANUAL_MODE:
+    p1_x, p1_y, p1_z, p1_spd, p1_dist, p1_ts = load_trust_route(JSONL_PATH1)
+
+    # Downsample PATH 1
+    STEP = 5
+    p1x = p1_x[::STEP]
+    p1y = p1_y[::STEP]
+    p1z = snap_to_terrain(p1x, p1y)
+    p1s = p1_spd[::STEP]
+    p1d = p1_dist[::STEP]
+    p1t = p1_ts[::STEP]
+
+    # ── PATH 2 (09-51-50) ───────────────────────────────────────────────────────
+    print("")
+    p2_x, p2_y, p2_z, p2_spd, p2_dist, p2_ts = load_trust_route(JSONL_PATH2)
+    KSTEP = 8
+    p2x = p2_x[::KSTEP]
+    p2y = p2_y[::KSTEP]
+    p2z = snap_to_terrain(p2x, p2y)
+    p2s = p2_spd[::KSTEP]
+    p2d = p2_dist[::KSTEP]
+    p2t = p2_ts[::KSTEP]
+else:
+    # MANUAL_MODE: nema GPS ruta
+    p1_x = p1_y = p1_z = p1_spd = p1_dist = p1_ts = []
+    p1x = p1y = p1z = p1s = p1d = p1t = []
+    p2_x = p2_y = p2_z = p2_spd = p2_dist = p2_ts = []
+    p2x = p2y = p2z = p2s = p2d = p2t = []
+    print("MANUELNI mode — GPS rute preskocene")
 
 # ── Trust mapa (racuna se tek kad su obje rute ucitane) ──────────────────────
 # Obje rute su robotske — 100% provjereno da je teren prohodan
@@ -761,101 +887,135 @@ surf_trust = go.Surface(
 traces = [surf_trav, surf_sat, surf_trust]
 
 # ─ PATH 1 (GPS iz JSONL) ─
-hover_p1 = [
-    f"<b>PATH 1</b><br>"
-    f"Dist: {p1d[i]:.1f}m<br>"
-    f"Alt: {p1_z[::STEP][i]:.2f}m<br>"
-    f"Brzina: {p1s[i]:.1f}km/h<br>"
-    f"Vrijeme: {p1t[i][:19].replace('T',' ')}"
-    for i in range(len(p1x))
-]
-traces.append(
-    go.Scatter3d(
-        x=p1x,
-        y=p1y,
-        z=p1z,
-        mode="lines+markers",
-        line=dict(color="gold", width=6),
-        marker=dict(
-            size=3,
-            color=p1_dist[::STEP],
-            colorscale="YlOrRd",
-            showscale=False,
-        ),
-        name=f"PATH 1 (robot, 100% — {p1_dist[-1]:.0f}m)",
-        hovertext=hover_p1,
-        hoverinfo="text",
+if len(p1x) > 0:
+    hover_p1 = [
+        f"<b>PATH 1</b><br>"
+        f"Dist: {p1d[i]:.1f}m<br>"
+        f"Alt: {p1_z[::STEP][i]:.2f}m<br>"
+        f"Brzina: {p1s[i]:.1f}km/h<br>"
+        f"Vrijeme: {p1t[i][:19].replace('T',' ')}"
+        for i in range(len(p1x))
+    ]
+    traces.append(
+        go.Scatter3d(
+            x=p1x,
+            y=p1y,
+            z=p1z,
+            mode="lines+markers",
+            line=dict(color="gold", width=6),
+            marker=dict(
+                size=3,
+                color=p1_dist[::STEP],
+                colorscale="YlOrRd",
+                showscale=False,
+            ),
+            name=f"PATH 1 (robot, 100% — {p1_dist[-1]:.0f}m)",
+            hovertext=hover_p1,
+            hoverinfo="text",
+        )
     )
-)
 
-# Markeri start/kraj PATH 1
-traces.append(
-    go.Scatter3d(
-        x=[p1x[0], p1x[-1]],
-        y=[p1y[0], p1y[-1]],
-        z=[p1z[0] + 1.5, p1z[-1] + 1.5],
-        mode="markers+text",
-        marker=dict(
-            size=12,
-            color=["gold", "orange"],
-            symbol="circle",
-            line=dict(color="white", width=2),
-        ),
-        text=["P1 START", "P1 KRAJ"],
-        textposition=["top center", "top center"],
-        textfont=dict(size=12, color="gold"),
-        name="P1 Start/Kraj",
-        hoverinfo="text",
+    # Markeri start/kraj PATH 1
+    traces.append(
+        go.Scatter3d(
+            x=[p1x[0], p1x[-1]],
+            y=[p1y[0], p1y[-1]],
+            z=[p1z[0] + 1.5, p1z[-1] + 1.5],
+            mode="markers+text",
+            marker=dict(
+                size=12,
+                color=["gold", "orange"],
+                symbol="circle",
+                line=dict(color="white", width=2),
+            ),
+            text=["P1 START", "P1 KRAJ"],
+            textposition=["top center", "top center"],
+            textfont=dict(size=12, color="gold"),
+            name="P1 Start/Kraj",
+            hoverinfo="text",
+        )
     )
-)
 
 # ─ PATH 2 (GPS iz 09-51-50 JSONL) ─
-hover_p2 = [
-    f"<b>PATH 2</b><br>"
-    f"Dist: {p2d[i]:.1f}m<br>"
-    f"Alt: {p2_z[::KSTEP][i]:.2f}m<br>"
-    f"Brzina: {p2s[i]:.1f}km/h<br>"
-    f"Vrijeme: {p2t[i][:19].replace('T',' ')}"
-    for i in range(len(p2x))
-]
-traces.append(
-    go.Scatter3d(
-        x=p2x,
-        y=p2y,
-        z=p2z,
-        mode="lines+markers",
-        line=dict(color="mediumpurple", width=6),
-        marker=dict(
-            size=3,
-            color=p2_dist[::KSTEP],
-            colorscale="Purples",
-            showscale=False,
-        ),
-        name=f"PATH 2 (robot, 100% — {p2_dist[-1]:.0f}m)",
-        hovertext=hover_p2,
-        hoverinfo="text",
+if len(p2x) > 0:
+    hover_p2 = [
+        f"<b>PATH 2</b><br>"
+        f"Dist: {p2d[i]:.1f}m<br>"
+        f"Alt: {p2_z[::KSTEP][i]:.2f}m<br>"
+        f"Brzina: {p2s[i]:.1f}km/h<br>"
+        f"Vrijeme: {p2t[i][:19].replace('T',' ')}"
+        for i in range(len(p2x))
+    ]
+    traces.append(
+        go.Scatter3d(
+            x=p2x,
+            y=p2y,
+            z=p2z,
+            mode="lines+markers",
+            line=dict(color="mediumpurple", width=6),
+            marker=dict(
+                size=3,
+                color=p2_dist[::KSTEP],
+                colorscale="Purples",
+                showscale=False,
+            ),
+            name=f"PATH 2 (robot, 100% — {p2_dist[-1]:.0f}m)",
+            hovertext=hover_p2,
+            hoverinfo="text",
+        )
     )
-)
-# Markeri start/kraj PATH 2
-traces.append(
-    go.Scatter3d(
-        x=[p2x[0], p2x[-1]],
-        y=[p2y[0], p2y[-1]],
-        z=[p2z[0] + 1.5, p2z[-1] + 1.5],
-        mode="markers+text",
-        marker=dict(
-            size=12,
-            color=["mediumpurple", "violet"],
-            symbol="square",
-            line=dict(color="white", width=2),
-        ),
-        text=["P2 START", "P2 KRAJ"],
-        textposition=["top center", "top center"],
-        textfont=dict(size=12, color="mediumpurple"),
-        name="P2 Start/Kraj",
-        hoverinfo="text",
+    # Markeri start/kraj PATH 2
+    traces.append(
+        go.Scatter3d(
+            x=[p2x[0], p2x[-1]],
+            y=[p2y[0], p2y[-1]],
+            z=[p2z[0] + 1.5, p2z[-1] + 1.5],
+            mode="markers+text",
+            marker=dict(
+                size=12,
+                color=["mediumpurple", "violet"],
+                symbol="square",
+                line=dict(color="white", width=2),
+            ),
+            text=["P2 START", "P2 KRAJ"],
+            textposition=["top center", "top center"],
+            textfont=dict(size=12, color="mediumpurple"),
+            name="P2 Start/Kraj",
+            hoverinfo="text",
+        )
     )
-)
+
+# ─ Manuelne oznake ─
+if MANUAL_LABELS:
+    _lbl_xs, _lbl_ys, _lbl_zs, _lbl_ts = [], [], [], []
+    _x_step = float(x_m[1] - x_m[0])
+    _y_step = float(y_m[1] - y_m[0])
+    for _lx, _ly, _lt in MANUAL_LABELS:
+        _ci = int(np.clip(round((_lx - float(x_m[0])) / _x_step), 0, GRID_N - 1))
+        _ri = int(np.clip(round((_ly - float(y_m[0])) / _y_step), 0, GRID_N - 1))
+        _lbl_xs.append(_lx)
+        _lbl_ys.append(_ly)
+        _lbl_zs.append(float(elev_s[_ri, _ci]) + 3.0)
+        _lbl_ts.append(_lt)
+    traces.append(
+        go.Scatter3d(
+            x=_lbl_xs,
+            y=_lbl_ys,
+            z=_lbl_zs,
+            mode="markers+text",
+            marker=dict(
+                size=10,
+                color="cyan",
+                symbol="diamond",
+                line=dict(color="white", width=1),
+            ),
+            text=_lbl_ts,
+            textposition="top center",
+            textfont=dict(size=13, color="cyan"),
+            name="Oznake",
+            hoverinfo="text",
+        )
+    )
 
 # ─ Layout ─
 fig = go.Figure(data=traces)
@@ -957,10 +1117,18 @@ fig.update_layout(
         text=(
             f"3D Terrain Navigation Map  |  {LAT_CENTER}N, {LON_CENTER}E<br>"
             f"<sup>"
-            f"Zlato = PATH 1 ({p1_dist[-1]:.0f}m, robot 100%)  |  "
-            f"Ljubicasta = PATH 2 ({p2_dist[-1]:.0f}m, robot 100%)  |  "
-            f"Rutiranje: klikni pinove na 2D panelu  |  Layer toggle gore lijevo"
-            f"</sup>"
+            + (
+                f"Zlato = PATH 1 ({p1_dist[-1]:.0f}m, robot 100%)  |  "
+                if p1_dist
+                else ""
+            )
+            + (
+                f"Ljubicasta = PATH 2 ({p2_dist[-1]:.0f}m, robot 100%)  |  "
+                if p2_dist
+                else ""
+            )
+            + "Rutiranje: klikni pinove na 2D panelu  |  Layer toggle gore lijevo"
+            "</sup>"
         ),
         x=0.5,
         font=dict(size=15, color="white"),
@@ -1062,8 +1230,8 @@ if sat_b64:
     </div>
     <div id="hover-info">Scroll = zoom &bull; Drag = pan</div>
     <div id="legend">
-      <div class="leg"><span class="leg-dot" style="background:gold"></span>PATH 1 &ndash; robot ({p1_dist[-1]:.0f} m, 100%)</div>
-      <div class="leg"><span class="leg-dot" style="background:mediumpurple"></span>PATH 2 &ndash; robot ({p2_dist[-1]:.0f} m, 100%)</div>
+      <div class="leg"><span class="leg-dot" style="background:gold"></span>PATH 1 &ndash; robot ({f"{p1_dist[-1]:.0f}" if p1_dist else "--"} m, 100%)</div>
+      <div class="leg"><span class="leg-dot" style="background:mediumpurple"></span>PATH 2 &ndash; robot ({f"{p2_dist[-1]:.0f}" if p2_dist else "--"} m, 100%)</div>
       <hr class="leg-sep"/>
       <div class="leg-head">Trusted Area sloj:</div>
       <div class="leg"><span class="leg-dot" style="background:rgb(30,144,255)"></span>100% &ndash; UGV robot pro&scaron;ao</div>
@@ -1689,26 +1857,27 @@ for i in range(len(p1x) - 1):
         lw=2.5,
         zorder=12,
     )
-ax.scatter(
-    [p1x[0]],
-    [p1y[0]],
-    [p1z[0] + 1],
-    color="gold",
-    s=120,
-    marker="D",
-    zorder=13,
-    label="P1 START",
-)
-ax.scatter(
-    [p1x[-1]],
-    [p1y[-1]],
-    [p1z[-1] + 1],
-    color="orange",
-    s=120,
-    marker="D",
-    zorder=13,
-    label="P1 KRAJ",
-)
+if len(p1x) > 0:
+    ax.scatter(
+        [p1x[0]],
+        [p1y[0]],
+        [p1z[0] + 1],
+        color="gold",
+        s=120,
+        marker="D",
+        zorder=13,
+        label="P1 START",
+    )
+    ax.scatter(
+        [p1x[-1]],
+        [p1y[-1]],
+        [p1z[-1] + 1],
+        color="orange",
+        s=120,
+        marker="D",
+        zorder=13,
+        label="P1 KRAJ",
+    )
 
 # PATH 2
 if len(p2x) > 0:
@@ -1742,13 +1911,29 @@ if len(p2x) > 0:
         label="P2 KRAJ",
     )
 
+# Manuelne oznake
+_x_step_m = float(x_m[1] - x_m[0])
+_y_step_m = float(y_m[1] - y_m[0])
+for _lx, _ly, _lt in MANUAL_LABELS:
+    _ci = int(np.clip(round((_lx - float(x_m[0])) / _x_step_m), 0, GRID_N - 1))
+    _ri = int(np.clip(round((_ly - float(y_m[0])) / _y_step_m), 0, GRID_N - 1))
+    _lz = float(elev_s[_ri, _ci]) + 3.0
+    ax.scatter(
+        [_lx], [_ly], [_lz], color="cyan", s=80, marker="D", zorder=14, label=_lt
+    )
+    ax.text(_lx, _ly, _lz + 1.0, _lt, color="cyan", fontsize=8, ha="center")
+
 ax.set_xlabel("Istok-Zapad (m)", color="white", labelpad=8)
 ax.set_ylabel("Sjever-Jug (m)", color="white", labelpad=8)
 ax.set_zlabel("Visina (m)", color="white", labelpad=8)
 ax.tick_params(colors="white")
 ax.set_title(
-    f"3D Terrain Map  |  PATH 1 ({p1_dist[-1]:.0f}m) + PATH 2 ({p2_dist[-1]:.0f}m)\n"
-    f"{LAT_CENTER}N {LON_CENTER}E  |  Elev: {elev_s.min():.0f}–{elev_s.max():.0f}m",
+    (
+        f"3D Terrain Map  |  PATH 1 ({p1_dist[-1]:.0f}m) + PATH 2 ({p2_dist[-1]:.0f}m)\n"
+        if not MANUAL_MODE
+        else "3D Terrain Map  |  Manuelni pregled\n"
+    )
+    + f"{LAT_CENTER}N {LON_CENTER}E  |  Elev: {elev_s.min():.0f}–{elev_s.max():.0f}m",
     color="white",
     fontsize=12,
     pad=10,
@@ -1788,22 +1973,11 @@ plt.close(fig2)
 print(f"Statican PNG: {OUT_PNG}")
 
 # ── 8. Trust DB (JSONL) ──────────────────────────────────────────────────────
-# Baza povjerenja u JSONL formatu (jedan JSON objekat po liniji).
-# Schema:
-#   Linija 1 (meta):  {"type":"meta", "schema_version":2, ...}
-#   Ostale linije:    {"type":"point", "easting":..., "northing":...,
-#                      "altitude":..., "trust":..., "speed_kmh":...,
-#                      "risky":bool, "session_id":..., "timestamp":...}
-#
-# Deduplication: segment kljuc = (round(easting), round(northing)) ≈ 1m celija
-#   - novi unos  → dodaje se red
-#   - isti 1m kljuc vec postoji → azurira se samo speed_kmh
-#
-# Trust logika pri generisanju:
-#   1.0  — robot prosao, teren normalan (cost_map <= 0.88)
-#   0.9  — robot prosao kroz crvenu zonu (cost_map > 0.88), nije rucno
-#           potvrdjeno kao blokada → riskantan segment
-#   2.0  — rucno potvrdjeno: apsolutna blokada (manual_zones, nikad iz GPS)
+if MANUAL_MODE:
+    print("\nManuelni mode — trust_db.jsonl preskocen.")
+    print("\nGotovo!")
+    raise SystemExit(0)
+
 import datetime as _dt
 
 _trust_db_path = os.path.join(MAPS_DIR, "trust_db.jsonl")

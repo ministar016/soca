@@ -18,7 +18,7 @@ OUT_PNG = os.path.join(MAPS_DIR, "terrain_3d_result.png")
 TRUST_DB_PATH = os.path.join(MAPS_DIR, "trust_db.jsonl")
 
 # ── Grid resolution ───────────────────────────────────────────────────────────
-GRID_N = 60  # cells per axis
+GRID_N = 180  # cells per axis (~4 m/cell over 720 m → ±1 cell buffer ≈ 12 m corridor)
 _SAT_MARGIN = 1.5  # satellite tile padding around GPS bbox
 
 # ── Camera/antenna height ─────────────────────────────────────────────────────
