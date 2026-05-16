@@ -211,3 +211,15 @@ soca_terrain_app/results/
 soca_terrain_app/__pycache__/
 soca_terrain_app/soca_map/__pycache__/
 soca_terrain_app/*.html
+
+# soca_terrain_app_v2 generated/large files
+venv/
+.venv/
+soca_terrain_app_v2/tile_cache/
+soca_terrain_app_v2/elevation_cache.json
+soca_terrain_app_v2/elevation_meta.json
+soca_terrain_app_v2/satellite_meta.json
+soca_terrain_app_v2/satellite_tile.png
+soca_terrain_app_v2/trust_db.jsonl
+soca_terrain_app_v2/soca_map/__pycache__/
+soca_terrain_app_v2/__pycache__/

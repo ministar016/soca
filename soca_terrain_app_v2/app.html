@@ -1,0 +1,400 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>SOCA Terrain Live</title>
+  <script src="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Cesium.js"></script>
+  <link href="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; font-family: 'Segoe UI', sans-serif; }
+
+    #cesiumContainer { position: absolute; inset: 0; }
+
+    /* ── HUD panel ─────────────────────────────────────────────────── */
+    #hud {
+      position: absolute; top: 12px; left: 12px;
+      display: flex; flex-direction: column; gap: 8px;
+      pointer-events: none;
+    }
+    #title-box {
+      background: rgba(10,14,20,0.88); border: 1px solid rgba(255,215,0,0.35);
+      border-radius: 6px; padding: 8px 14px;
+      color: #FFD700; font-size: 15px; font-weight: 700;
+      letter-spacing: 1px; text-transform: uppercase;
+      pointer-events: none;
+    }
+    #status-box {
+      background: rgba(10,14,20,0.75); border: 1px solid rgba(255,255,255,0.12);
+      border-radius: 6px; padding: 6px 12px;
+      color: #aaa; font-size: 11px; line-height: 1.6;
+      pointer-events: none;
+    }
+    #status-box b { color: #ddd; }
+
+    /* ── Layer toggle buttons ──────────────────────────────────────── */
+    #layer-panel {
+      position: absolute; top: 12px; right: 12px;
+      display: flex; flex-direction: column; gap: 6px;
+    }
+    .layer-btn {
+      background: rgba(10,14,20,0.82); border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 5px; padding: 6px 14px;
+      color: #ccc; font-size: 12px; cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+      text-align: left; white-space: nowrap;
+    }
+    .layer-btn:hover  { background: rgba(255,215,0,0.12); color: #FFD700; border-color: rgba(255,215,0,0.5); }
+    .layer-btn.active { background: rgba(255,215,0,0.18); color: #FFD700; border-color: #FFD700; }
+
+    /* ── Route legend ──────────────────────────────────────────────── */
+    #legend {
+      position: absolute; bottom: 36px; left: 12px;
+      background: rgba(10,14,20,0.82); border: 1px solid rgba(255,255,255,0.15);
+      border-radius: 6px; padding: 10px 14px;
+      min-width: 160px;
+    }
+    #legend h4 { color: #aaa; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
+    .legend-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; cursor: pointer; }
+    .legend-row:hover .legend-name { color: #fff; }
+    .legend-swatch { width: 28px; height: 3px; border-radius: 2px; flex-shrink: 0; }
+    .legend-name { color: #bbb; font-size: 11px; }
+
+    /* ── Tooltip ────────────────────────────────────────────────────── */
+    #tooltip {
+      position: absolute; pointer-events: none;
+      background: rgba(10,14,20,0.9); border: 1px solid rgba(255,255,255,0.2);
+      border-radius: 5px; padding: 6px 10px;
+      color: #ddd; font-size: 11px; line-height: 1.5;
+      display: none; max-width: 220px;
+    }
+
+    /* ── Loading overlay ─────────────────────────────────────────────── */
+    #loading {
+      position: absolute; inset: 0;
+      background: #0a0e14;
+      display: flex; flex-direction: column; align-items: center; justify-content: center;
+      z-index: 99;
+      transition: opacity 0.6s;
+    }
+    #loading.fade { opacity: 0; pointer-events: none; }
+    #loading h2 { color: #FFD700; font-size: 22px; letter-spacing: 3px; margin-bottom: 16px; }
+    #loading p  { color: #777; font-size: 13px; }
+    #progress-bar-wrap { width: 260px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 18px; overflow: hidden; }
+    #progress-bar { height: 100%; width: 0%; background: #FFD700; border-radius: 2px; transition: width 0.3s; }
+  </style>
+</head>
+<body>
+
+<div id="loading">
+  <h2>SOCA TERRAIN</h2>
+  <p id="loading-msg">Initialising CesiumJS…</p>
+  <div id="progress-bar-wrap"><div id="progress-bar"></div></div>
+</div>
+
+<div id="cesiumContainer"></div>
+
+<!-- HUD -->
+<div id="hud">
+  <div id="title-box">⬡ SOCA Terrain &nbsp;|&nbsp; v2 Live</div>
+  <div id="status-box">
+    <div>Routes loaded: <b id="stat-routes">—</b></div>
+    <div>Total points: <b id="stat-pts">—</b></div>
+    <div>Elev range: <b id="stat-elev">—</b></div>
+    <div>Camera alt: <b id="stat-cam">—</b></div>
+  </div>
+</div>
+
+<!-- Layer toggles -->
+<div id="layer-panel">
+  <button class="layer-btn active" id="btn-sat"     onclick="toggleLayer('sat')">🛰 Satellite</button>
+  <button class="layer-btn active" id="btn-routes"  onclick="toggleLayer('routes')">〰 GPS Routes</button>
+  <button class="layer-btn"        id="btn-trust"   onclick="toggleLayer('trust')">🗺 Trust Layer</button>
+</div>
+
+<!-- Legend (populated dynamically) -->
+<div id="legend">
+  <h4>Routes</h4>
+  <div id="legend-rows"></div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip"></div>
+
+<script>
+"use strict";
+
+// ── Globals ──────────────────────────────────────────────────────────────────
+let satLayer = null;
+let routeEntities = [];
+let trustPrimitive = null;
+let layers = { sat: true, routes: true, trust: false };
+
+// ── Progress helper ───────────────────────────────────────────────────────────
+function setProgress(pct, msg) {
+  document.getElementById("progress-bar").style.width = pct + "%";
+  document.getElementById("loading-msg").textContent = msg;
+}
+
+// ── Viewer ───────────────────────────────────────────────────────────────────
+setProgress(10, "Building satellite imagery layer…");
+
+// CesiumJS 1.107+ requires the `terrain:` constructor option to prevent the
+// viewer from asynchronously fetching Cesium World Terrain from Ion.
+// We use ArcGIS World Elevation — free, no token, real 3D elevation data.
+Cesium.Ion.defaultAccessToken = "dummy-no-ion";
+
+const viewer = new Cesium.Viewer("cesiumContainer", {
+  baseLayer: false,
+  terrain: new Cesium.Terrain(
+    Cesium.ArcGISTiledElevationTerrainProvider.fromUrl(
+      "https://elevation3d.arcgis.com/arcgis/rest/services/WorldElevation3D/Terrain3D/ImageServer"
+    )
+  ),
+  baseLayerPicker: false,
+  geocoder: false,
+  homeButton: false,
+  sceneModePicker: false,
+  navigationHelpButton: false,
+  animation: false,
+  timeline: false,
+  fullscreenButton: false,
+  infoBox: false,
+  selectionIndicator: false,
+  shadows: false,
+  creditContainer: document.createElement("div"),
+});
+
+viewer.scene.globe.enableLighting = false;
+viewer.scene.backgroundColor = Cesium.Color.fromCssColorString("#0a0e14");
+viewer.scene.globe.baseColor = Cesium.Color.fromCssColorString("#151a22");
+
+// Add satellite imagery layer manually (avoids Ion dependency)
+satLayer = viewer.imageryLayers.addImageryProvider(
+  new Cesium.UrlTemplateImageryProvider({
+    url: window.location.origin + "/tile/sat/{z}/{x}/{y}.png",
+    tilingScheme: new Cesium.WebMercatorTilingScheme(),
+    minimumLevel: 0,
+    maximumLevel: 19,
+    tileWidth: 256,
+    tileHeight: 256,
+    credit: "ESRI World Imagery"
+  })
+);
+
+// ── Camera update loop ───────────────────────────────────────────────────────
+const camStat = document.getElementById("stat-cam");
+viewer.scene.postRender.addEventListener(() => {
+  const alt = viewer.camera.positionCartographic.height;
+  camStat.textContent = alt >= 1000
+    ? (alt / 1000).toFixed(1) + " km"
+    : alt.toFixed(0) + " m";
+});
+
+// ── Fetch bounds → fly to area on startup ────────────────────────────────────
+setProgress(30, "Fetching map bounds…");
+fetch("/api/bounds")
+  .then(r => r.json())
+  .then(b => {
+    viewer.camera.flyTo({
+      destination: Cesium.Cartesian3.fromDegrees(
+        b.lon_center, b.lat_center,
+        3500               // start altitude ~3.5 km above terrain
+      ),
+      orientation: {
+        heading: Cesium.Math.toRadians(0),
+        pitch:   Cesium.Math.toRadians(-45),
+        roll:    0.0
+      },
+      duration: 2.5
+    });
+    setProgress(50, "Loading GPS routes…");
+    return fetch("/api/routes");
+  })
+  .then(r => r.json())
+  .then(geojson => loadRoutes(geojson))
+  .then(() => {
+    setProgress(90, "Ready.");
+    setTimeout(() => {
+      const overlay = document.getElementById("loading");
+      overlay.classList.add("fade");
+      setTimeout(() => overlay.remove(), 700);
+    }, 400);
+  })
+  .catch(err => {
+    document.getElementById("loading-msg").textContent = "Error: " + err.message;
+    console.error(err);
+  });
+
+// ── Load GPS routes ───────────────────────────────────────────────────────────
+function hexToCesiumColor(hex, alpha = 1.0) {
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  return new Cesium.Color(r, g, b, alpha);
+}
+
+async function loadRoutes(geojson) {
+  const features = geojson.features || [];
+  let totalPts = 0;
+
+  const legendRows = document.getElementById("legend-rows");
+  legendRows.innerHTML = "";
+
+  for (const feature of features) {
+    const props = feature.properties;
+    const coords = feature.geometry.coordinates; // [lon, lat, alt]
+    const color = hexToCesiumColor(props.color);
+    totalPts += coords.length;
+
+    // ── Polyline entity (clamped to ground) ─────────────────────────
+    // Drop z — Cesium EllipsoidTerrainProvider has ground at 0m ellipsoid;
+    // GPS MSL altitudes (~490 m) would float the routes high in the sky.
+    const positions = coords.map(c => Cesium.Cartesian3.fromDegrees(c[0], c[1]));
+    const entity = viewer.entities.add({
+      name: props.name,
+      polyline: {
+        positions: positions,
+        width: 3.0,
+        material: new Cesium.ColorMaterialProperty(color),
+        clampToGround: true
+      }
+    });
+    routeEntities.push(entity);
+
+    // ── Legend row ───────────────────────────────────────────────────
+    const row = document.createElement("div");
+    row.className = "legend-row";
+    row.dataset.idx = routeEntities.length - 1;
+    row.innerHTML = `
+      <div class="legend-swatch" style="background:${props.color}"></div>
+      <span class="legend-name">${props.name}</span>`;
+    row.onclick = () => {
+      const e = routeEntities[+row.dataset.idx];
+      viewer.flyTo(e, { duration: 1.5 });
+    };
+    legendRows.appendChild(row);
+  }
+
+  document.getElementById("stat-routes").textContent = features.length;
+  document.getElementById("stat-pts").textContent    = totalPts.toLocaleString();
+
+  // elevation stats from DEM
+  fetch("/api/dem")
+    .then(r => r.json())
+    .then(d => {
+      document.getElementById("stat-elev").textContent =
+        d.elev_min.toFixed(0) + " – " + d.elev_max.toFixed(0) + " m";
+    });
+
+  setProgress(75, "Building trust map…");
+  await loadTrustLayer();
+}
+
+// ── Trust layer (grid → ground primitives) ────────────────────────────────────
+async function loadTrustLayer() {
+  const data = await fetch("/api/trust").then(r => r.json());
+  const N = data.grid_n;
+  const grid = data.grid;
+  const latMin = data.lat_min, latMax = data.lat_max;
+  const lonMin = data.lon_min, lonMax = data.lon_max;
+  const latStep = (latMax - latMin) / N;
+  const lonStep = (lonMax - lonMin) / N;
+
+  // Build ground-clamped rectangles per cell (sampled, not all cells)
+  // To keep performance, skip low-trust cells and downsample
+  const instances = [];
+  const SUBSAMPLE = 2;   // draw every 2nd cell to keep GPU load manageable
+  for (let row = 0; row < N; row += SUBSAMPLE) {
+    for (let col = 0; col < N; col += SUBSAMPLE) {
+      const t = grid[row * N + col];
+      if (t < 0.05) continue;   // skip very-low-trust cells
+
+      const sLat = latMin + row * latStep;
+      const eLat = sLat + latStep * SUBSAMPLE;
+      const sLon = lonMin + col * lonStep;
+      const eLon = sLon + lonStep * SUBSAMPLE;
+
+      // Colour: cold blue → hot gold based on trust
+      const hue = (1 - t) * 240;   // 240° (blue) at 0 trust, 0° (red/gold) at 1
+      const alpha = 0.35 + t * 0.35;
+
+      instances.push(new Cesium.GeometryInstance({
+        geometry: new Cesium.RectangleGeometry({
+          rectangle: Cesium.Rectangle.fromDegrees(sLon, sLat, eLon, eLat),
+          // No height — GroundPrimitive drapes onto the terrain surface
+          granularity: Cesium.Math.toRadians(0.1)
+        }),
+        attributes: {
+          color: Cesium.ColorGeometryInstanceAttribute.fromColor(
+            Cesium.Color.fromHsl(hue / 360, 0.8, 0.55, alpha)
+          )
+        }
+      }));
+    }
+  }
+
+  if (instances.length === 0) return;
+
+  // GroundPrimitive drapes the heatmap directly onto the terrain/ellipsoid,
+  // avoiding z-fighting with satellite imagery.
+  trustPrimitive = viewer.scene.primitives.add(
+    new Cesium.GroundPrimitive({
+      geometryInstances: instances,
+      appearance: new Cesium.PerInstanceColorAppearance({ flat: true }),
+      asynchronous: true
+    })
+  );
+  trustPrimitive.show = layers.trust;
+}
+
+// ── Layer toggle ──────────────────────────────────────────────────────────────
+function toggleLayer(name) {
+  layers[name] = !layers[name];
+  const btn = document.getElementById("btn-" + name);
+  btn.classList.toggle("active", layers[name]);
+
+  switch (name) {
+    case "sat":
+      if (satLayer) satLayer.show = layers.sat;
+      break;
+    case "routes":
+      routeEntities.forEach(e => e.show = layers.routes);
+      break;
+    case "trust":
+      if (trustPrimitive) trustPrimitive.show = layers.trust;
+      break;
+  }
+}
+
+// ── Mouse hover tooltip ────────────────────────────────────────────────────────
+const tooltip = document.getElementById("tooltip");
+const handler = new Cesium.ScreenSpaceEventHandler(viewer.scene.canvas);
+
+handler.setInputAction(movement => {
+  const picked = viewer.scene.pick(movement.endPosition);
+  if (Cesium.defined(picked) && Cesium.defined(picked.id) && picked.id.name) {
+    tooltip.style.display = "block";
+    tooltip.style.left = (movement.endPosition.x + 18) + "px";
+    tooltip.style.top  = (movement.endPosition.y + 12) + "px";
+    tooltip.innerHTML = `<b>${picked.id.name}</b>`;
+  } else {
+    tooltip.style.display = "none";
+  }
+}, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+// ── Double-click: reset camera to overview ─────────────────────────────────────
+handler.setInputAction(() => {
+  fetch("/api/bounds")
+    .then(r => r.json())
+    .then(b => {
+      viewer.camera.flyTo({
+        destination: Cesium.Cartesian3.fromDegrees(b.lon_center, b.lat_center, 3500),
+        orientation: { heading: 0, pitch: Cesium.Math.toRadians(-45), roll: 0 },
+        duration: 2.0
+      });
+    });
+}, Cesium.ScreenSpaceEventType.LEFT_DOUBLE_CLICK);
+</script>
+</body>
+</html>
