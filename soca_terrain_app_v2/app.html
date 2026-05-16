@@ -5,82 +5,103 @@
   <title>SOCA Terrain Live</title>
   <script src="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Cesium.js"></script>
   <link href="https://cesium.com/downloads/cesiumjs/releases/1.116/Build/Cesium/Widgets/widgets.css" rel="stylesheet" />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
-    html, body { width: 100%; height: 100%; overflow: hidden; background: #0a0a0a; font-family: 'Segoe UI', sans-serif; }
+    html, body { width: 100%; height: 100%; overflow: hidden;
+      background: #0a0a0a; font-family: 'Segoe UI', sans-serif; color: #ccc; }
 
-    #cesiumContainer { position: absolute; inset: 0; }
+    #cesiumContainer { position: absolute; top: 0; left: 0; right: 320px; bottom: 0; }
 
-    /* ── HUD panel ─────────────────────────────────────────────────── */
-    #hud {
-      position: absolute; top: 12px; left: 12px;
-      display: flex; flex-direction: column; gap: 8px;
-      pointer-events: none;
+    #ctrl-panel {
+      position: absolute; top: 0; right: 0; width: 320px; height: 100%;
+      background: #0d1117; border-left: 1px solid rgba(255,215,0,0.14);
+      overflow-y: auto; display: flex; flex-direction: column; z-index: 10;
     }
+    #ctrl-panel::-webkit-scrollbar { width: 4px; }
+    #ctrl-panel::-webkit-scrollbar-thumb { background: rgba(255,215,0,0.2); border-radius: 2px; }
+    .panel-header {
+      background: rgba(255,215,0,0.07); border-bottom: 1px solid rgba(255,215,0,0.18);
+      color: #FFD700; font-size: 12px; font-weight: 700;
+      letter-spacing: 1.5px; text-transform: uppercase; padding: 10px 14px; flex-shrink: 0;
+    }
+    .panel-section { padding: 10px 12px; border-bottom: 1px solid rgba(255,255,255,0.05); flex-shrink: 0; }
+    .section-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+    .section-title { font-size: 9px; font-weight: 700; letter-spacing: 1.5px; text-transform: uppercase; color: #555; }
+    #map2d { height: 200px; border-radius: 4px; overflow: hidden; border: 1px solid rgba(255,255,255,0.07); }
+    #map2d-hint { font-size: 9px; color: #555; margin-top: 3px; text-align: center; }
+    .layer-toggles { display: flex; flex-direction: column; gap: 4px; }
+    .layer-btn {
+      background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.1);
+      border-radius: 4px; padding: 5px 10px; color: #777; font-size: 11px;
+      cursor: pointer; text-align: left; transition: all 0.15s;
+    }
+    .layer-btn:hover  { color: #FFD700; border-color: rgba(255,215,0,0.4); }
+    .layer-btn.active { color: #FFD700; border-color: rgba(255,215,0,0.55); background: rgba(255,215,0,0.07); }
+    .mode-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 4px; margin-bottom: 6px; }
+    .mode-btn {
+      background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 4px; padding: 6px 3px; color: #666; font-size: 10px;
+      cursor: pointer; line-height: 1.35; text-align: center; transition: all 0.15s;
+    }
+    .mode-btn:hover  { color: #ccc; border-color: rgba(255,255,255,0.25); }
+    .mode-btn.active { color: #FFD700; border-color: #FFD700; background: rgba(255,215,0,0.1); }
+    .mode-hint { font-size: 10px; color: #555; font-style: italic; min-height: 14px; }
+    .trust-row { display: flex; align-items: center; gap: 6px; margin: 6px 0; }
+    .trust-row label { font-size: 10px; color: #777; white-space: nowrap; }
+    .trust-row span  { font-size: 10px; color: #FFD700; width: 28px; text-align: right; flex-shrink: 0; }
+    input[type=range] { flex: 1; accent-color: #FFD700; }
+    #zone-vtx-count { font-size: 10px; color: #FFD700; }
+    .btn-row { display: flex; gap: 4px; margin-top: 6px; }
+    .action-btn {
+      flex: 1; padding: 6px; border-radius: 4px; font-size: 11px; cursor: pointer;
+      border: 1px solid rgba(255,215,0,0.45); background: rgba(255,215,0,0.1);
+      color: #FFD700; transition: background 0.15s;
+    }
+    .action-btn:hover { background: rgba(255,215,0,0.2); }
+    .action-btn.secondary { border-color: rgba(255,255,255,0.12); background: rgba(255,255,255,0.04); color: #777; }
+    .action-btn.secondary:hover { background: rgba(255,255,255,0.09); color: #bbb; }
+    .list-item { display: flex; align-items: center; gap: 6px; padding: 4px 0; border-bottom: 1px solid rgba(255,255,255,0.04); }
+    .list-dot    { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    .list-swatch { width: 22px; height: 2px; border-radius: 1px; flex-shrink: 0; }
+    .list-name   { flex: 1; font-size: 11px; color: #bbb; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .list-meta   { font-size: 10px; color: #555; flex-shrink: 0; }
+    .list-del { background: none; border: none; cursor: pointer; color: #555; font-size: 11px; padding: 1px 3px; }
+    .list-del:hover { color: #ff6b6b; }
+    .list-fly { background: none; border: none; cursor: pointer; color: #555; font-size: 11px; padding: 1px 3px; }
+    .list-fly:hover { color: #FFD700; }
+    .empty-hint { font-size: 10px; color: #444; font-style: italic; padding: 3px 0; }
+    .route-pt { display: flex; align-items: center; gap: 6px; padding: 3px 0; font-size: 10px; color: #666; }
+    .pt-dot   { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+    #route-gen-status { font-size: 10px; color: #aaa; margin-top: 4px; min-height: 14px; }
+    #hud { position: absolute; top: 10px; left: 10px; pointer-events: none; z-index: 5; }
     #title-box {
       background: rgba(10,14,20,0.88); border: 1px solid rgba(255,215,0,0.35);
-      border-radius: 6px; padding: 8px 14px;
-      color: #FFD700; font-size: 15px; font-weight: 700;
-      letter-spacing: 1px; text-transform: uppercase;
-      pointer-events: none;
+      border-radius: 5px; padding: 5px 12px;
+      color: #FFD700; font-size: 12px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase;
     }
-    #status-box {
-      background: rgba(10,14,20,0.75); border: 1px solid rgba(255,255,255,0.12);
-      border-radius: 6px; padding: 6px 12px;
-      color: #aaa; font-size: 11px; line-height: 1.6;
-      pointer-events: none;
+    #stat-line {
+      background: rgba(10,14,20,0.7); border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 5px; padding: 4px 10px; margin-top: 4px;
+      font-size: 10px; color: #999; line-height: 1.7;
     }
-    #status-box b { color: #ddd; }
-
-    /* ── Layer toggle buttons ──────────────────────────────────────── */
-    #layer-panel {
-      position: absolute; top: 12px; right: 12px;
-      display: flex; flex-direction: column; gap: 6px;
-    }
-    .layer-btn {
-      background: rgba(10,14,20,0.82); border: 1px solid rgba(255,255,255,0.2);
-      border-radius: 5px; padding: 6px 14px;
-      color: #ccc; font-size: 12px; cursor: pointer;
-      transition: background 0.15s, color 0.15s, border-color 0.15s;
-      text-align: left; white-space: nowrap;
-    }
-    .layer-btn:hover  { background: rgba(255,215,0,0.12); color: #FFD700; border-color: rgba(255,215,0,0.5); }
-    .layer-btn.active { background: rgba(255,215,0,0.18); color: #FFD700; border-color: #FFD700; }
-
-    /* ── Route legend ──────────────────────────────────────────────── */
-    #legend {
-      position: absolute; bottom: 36px; left: 12px;
-      background: rgba(10,14,20,0.82); border: 1px solid rgba(255,255,255,0.15);
-      border-radius: 6px; padding: 10px 14px;
-      min-width: 160px;
-    }
-    #legend h4 { color: #aaa; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 6px; }
-    .legend-row { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; cursor: pointer; }
-    .legend-row:hover .legend-name { color: #fff; }
-    .legend-swatch { width: 28px; height: 3px; border-radius: 2px; flex-shrink: 0; }
-    .legend-name { color: #bbb; font-size: 11px; }
-
-    /* ── Tooltip ────────────────────────────────────────────────────── */
+    #stat-line b { color: #ddd; }
     #tooltip {
       position: absolute; pointer-events: none;
-      background: rgba(10,14,20,0.9); border: 1px solid rgba(255,255,255,0.2);
-      border-radius: 5px; padding: 6px 10px;
-      color: #ddd; font-size: 11px; line-height: 1.5;
-      display: none; max-width: 220px;
+      background: rgba(10,14,20,0.92); border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 4px; padding: 5px 9px; color: #ddd; font-size: 11px;
+      display: none; z-index: 20;
     }
-
-    /* ── Loading overlay ─────────────────────────────────────────────── */
     #loading {
-      position: absolute; inset: 0;
-      background: #0a0e14;
+      position: absolute; inset: 0; background: #0a0e14;
       display: flex; flex-direction: column; align-items: center; justify-content: center;
-      z-index: 99;
-      transition: opacity 0.6s;
+      z-index: 99; transition: opacity 0.6s;
     }
     #loading.fade { opacity: 0; pointer-events: none; }
-    #loading h2 { color: #FFD700; font-size: 22px; letter-spacing: 3px; margin-bottom: 16px; }
-    #loading p  { color: #777; font-size: 13px; }
-    #progress-bar-wrap { width: 260px; height: 4px; background: rgba(255,255,255,0.1); border-radius: 2px; margin-top: 18px; overflow: hidden; }
+    #loading h2 { color: #FFD700; font-size: 22px; letter-spacing: 3px; margin-bottom: 14px; }
+    #loading p  { color: #666; font-size: 12px; }
+    #progress-bar-wrap { width: 240px; height: 3px; background: rgba(255,255,255,0.08); border-radius: 2px; margin-top: 16px; overflow: hidden; }
     #progress-bar { height: 100%; width: 0%; background: #FFD700; border-radius: 2px; transition: width 0.3s; }
   </style>
 </head>
@@ -93,33 +114,106 @@
 </div>
 
 <div id="cesiumContainer"></div>
+<div id="tooltip"></div>
 
-<!-- HUD -->
+<!-- HUD (top-left of 3D view) -->
 <div id="hud">
-  <div id="title-box">⬡ SOCA Terrain &nbsp;|&nbsp; v2 Live</div>
-  <div id="status-box">
-    <div>Routes loaded: <b id="stat-routes">—</b></div>
-    <div>Total points: <b id="stat-pts">—</b></div>
-    <div>Elev range: <b id="stat-elev">—</b></div>
-    <div>Camera alt: <b id="stat-cam">—</b></div>
+  <div id="title-box">&#x2B21; SOCA Terrain v2</div>
+  <div id="stat-line">
+    Routes: <b id="stat-routes">—</b> &nbsp;|&nbsp;
+    Pts: <b id="stat-pts">—</b> &nbsp;|&nbsp;
+    Elev: <b id="stat-elev">—</b> &nbsp;|&nbsp;
+    Alt: <b id="stat-cam">—</b>
   </div>
 </div>
 
-<!-- Layer toggles -->
-<div id="layer-panel">
-  <button class="layer-btn active" id="btn-sat"     onclick="toggleLayer('sat')">🛰 Satellite</button>
-  <button class="layer-btn active" id="btn-routes"  onclick="toggleLayer('routes')">〰 GPS Routes</button>
-  <button class="layer-btn"        id="btn-trust"   onclick="toggleLayer('trust')">🗺 Trust Layer</button>
-</div>
+<!-- Right control panel -->
+<div id="ctrl-panel">
+  <div class="panel-header">&#x2B21;&nbsp;SOCA Control Panel</div>
 
-<!-- Legend (populated dynamically) -->
-<div id="legend">
-  <h4>Routes</h4>
-  <div id="legend-rows"></div>
-</div>
+  <!-- 2D Bird's-eye map -->
+  <div class="panel-section">
+    <div class="section-row">
+      <span class="section-title">2D Bird’s-eye View</span>
+      <span id="zone-vtx-count"></span>
+    </div>
+    <div id="map2d"></div>
+    <div id="map2d-hint">Click map to fly 3D camera here &bull; routes sync live</div>
+  </div>
 
-<!-- Tooltip -->
-<div id="tooltip"></div>
+  <!-- Layers -->
+  <div class="panel-section">
+    <div class="section-title" style="margin-bottom:6px">Layers</div>
+    <div class="layer-toggles">
+      <button class="layer-btn active" id="btn-sat"    onclick="toggleLayer('sat')">&#x1F6F0; Satellite imagery</button>
+      <button class="layer-btn active" id="btn-routes" onclick="toggleLayer('routes')">&#x301C; Recorded GPS routes</button>
+      <button class="layer-btn"        id="btn-trust"  onclick="toggleLayer('trust')">&#x1F5FA; Trust heatmap</button>
+    </div>
+  </div>
+
+  <!-- Mode selector -->
+  <div class="panel-section">
+    <div class="section-title" style="margin-bottom:6px">Active Mode</div>
+    <div class="mode-grid">
+      <button class="mode-btn active" id="mbtn-view"        onclick="setMode('view')">&#x1F441;<br>View</button>
+      <button class="mode-btn"        id="mbtn-trust_add"   onclick="setMode('trust_add')">&#x2705;<br>Add Trust</button>
+      <button class="mode-btn"        id="mbtn-trust_block" onclick="setMode('trust_block')">&#x1F6AB;<br>Block</button>
+      <button class="mode-btn"        id="mbtn-route_a"     onclick="setMode('route_a')">&#x1F7E2;<br>Route A</button>
+      <button class="mode-btn"        id="mbtn-route_b"     onclick="setMode('route_b')">&#x1F534;<br>Route B</button>
+      <button class="mode-btn"        id="mbtn-label"       onclick="setMode('label')">&#x1F3F7;<br>Label</button>
+    </div>
+    <div id="mode-hint" class="mode-hint">Navigate freely in 3D and 2D views</div>
+  </div>
+
+  <!-- Trust zones -->
+  <div class="panel-section">
+    <div class="section-row">
+      <span class="section-title">Trust Zones</span>
+    </div>
+    <div class="trust-row">
+      <label>Trust level:</label>
+      <input type="range" id="trust-slider" min="0" max="1" step="0.05" value="1"
+        oninput="document.getElementById('trust-val').textContent=parseFloat(this.value).toFixed(2)">
+      <span id="trust-val">1.00</span>
+    </div>
+    <div class="btn-row" id="zone-action-btns" style="display:none">
+      <button class="action-btn" onclick="applyZone()">&#x2713; Apply Zone</button>
+      <button class="action-btn secondary" onclick="cancelZone()">&#x2715; Cancel</button>
+    </div>
+    <div id="zone-list"><div class="empty-hint">No manual zones yet</div></div>
+  </div>
+
+  <!-- Route generator -->
+  <div class="panel-section">
+    <div class="section-title" style="margin-bottom:6px">Route Generator (A*)</div>
+    <div class="route-pt">
+      <span class="pt-dot" style="background:#00FF7F"></span>
+      <span id="route-start-txt">Start — use Route A mode</span>
+    </div>
+    <div class="route-pt">
+      <span class="pt-dot" style="background:#FF4444"></span>
+      <span id="route-end-txt">End — use Route B mode</span>
+    </div>
+    <div class="btn-row">
+      <button class="action-btn" onclick="generateRoute()">&#x25B6; Generate</button>
+      <button class="action-btn secondary" onclick="clearGeneratedRoute()">&#x2715; Clear</button>
+    </div>
+    <div id="route-gen-status"></div>
+  </div>
+
+  <!-- Labels -->
+  <div class="panel-section">
+    <div class="section-title" style="margin-bottom:6px">Labels</div>
+    <div id="label-list"><div class="empty-hint">Use Label mode, then click on 3D view</div></div>
+  </div>
+
+  <!-- GPS routes legend -->
+  <div class="panel-section">
+    <div class="section-title" style="margin-bottom:6px">Recorded GPS Paths</div>
+    <div id="legend-rows"><div class="empty-hint">Loading…</div></div>
+  </div>
+
+</div><!-- #ctrl-panel -->
 
 <script>
 "use strict";
@@ -127,13 +221,279 @@
 // ── Globals ──────────────────────────────────────────────────────────────────
 let satLayer = null;
 let routeEntities = [];
+let routeLeafletLayers = [];
 let trustPrimitive = null;
+let zoneEntities = [];
 let layers = { sat: true, routes: true, trust: false };
+
+let currentMode = "view";
+let zoneVertices = [];
+let zonePreviewPolyline = null;
+let zoneMarkers = [];
+let routeStart = null;
+let routeEnd = null;
+let routeStartMarker = null;
+let routeEndMarker = null;
+let generatedRouteEntity = null;
+let generatedRouteLeaflet = null;
+let labels = [];
+let manualZones = [];
+let boundsData = null;
+let map2d = null;
+let map2dSatLayer = null;
+let _syncThrottleTs = 0;
+
+const HINT = {
+  view:        "Navigate freely — double-click 3D to reset camera",
+  trust_add:   "Click on 2D map to place polygon vertices, then Apply",
+  trust_block: "Click on 2D map to place blocked-zone vertices, then Apply",
+  route_a:     "Click on 2D map to set route START point (green)",
+  route_b:     "Click on 2D map to set route END point (red)",
+  label:       "Click on 3D view to drop a label at that location",
+};
 
 // ── Progress helper ───────────────────────────────────────────────────────────
 function setProgress(pct, msg) {
   document.getElementById("progress-bar").style.width = pct + "%";
   document.getElementById("loading-msg").textContent = msg;
+}
+
+// ── Mode selector ─────────────────────────────────────────────────────────────
+function setMode(name) {
+  currentMode = name;
+  document.querySelectorAll(".mode-btn").forEach(b => b.classList.remove("active"));
+  const btn = document.getElementById("mbtn-" + name);
+  if (btn) btn.classList.add("active");
+  document.getElementById("mode-hint").textContent = HINT[name] || "";
+
+  // Reset zone drawing state when switching away
+  if (name !== "trust_add" && name !== "trust_block") {
+    cancelZone(false);
+  }
+  document.getElementById("zone-action-btns").style.display =
+    (name === "trust_add" || name === "trust_block") ? "flex" : "none";
+  document.getElementById("zone-vtx-count").textContent = "";
+}
+
+// ── Zone drawing ──────────────────────────────────────────────────────────────
+function _updateZonePreview() {
+  if (zonePreviewPolyline) map2d.removeLayer(zonePreviewPolyline);
+  zonePreviewPolyline = null;
+  if (zoneVertices.length >= 2) {
+    const pts = [...zoneVertices, zoneVertices[0]]; // close loop
+    zonePreviewPolyline = L.polyline(pts, {
+      color: currentMode === "trust_block" ? "#FF4444" : "#FFD700",
+      weight: 2, dashArray: "5,4", opacity: 0.85
+    }).addTo(map2d);
+  }
+  const n = zoneVertices.length;
+  document.getElementById("zone-vtx-count").textContent =
+    n > 0 ? n + " pt" + (n > 1 ? "s" : "") : "";
+}
+
+function cancelZone(resetMode = true) {
+  zoneVertices = [];
+  if (zonePreviewPolyline) { map2d && map2d.removeLayer(zonePreviewPolyline); zonePreviewPolyline = null; }
+  zoneMarkers.forEach(m => map2d && map2d.removeLayer(m));
+  zoneMarkers = [];
+  document.getElementById("zone-vtx-count").textContent = "";
+  if (resetMode) setMode("view");
+}
+
+async function applyZone() {
+  if (zoneVertices.length < 3) {
+    alert("Place at least 3 points to create a zone."); return;
+  }
+  const trustLevel = currentMode === "trust_block"
+    ? 0.0
+    : parseFloat(document.getElementById("trust-slider").value);
+  const zoneCount = manualZones.length + 1;
+  const label = (currentMode === "trust_block" ? "Blocked Zone " : "Trust Zone ") + zoneCount;
+
+  try {
+    const res = await fetch("/api/trust/zone", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ polygon: zoneVertices, trust_level: trustLevel, label })
+    });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.detail || "Server error");
+    manualZones = data.zones;
+    renderZoneList();
+    cancelZone(false);
+    await reloadTrustLayer();
+    setMode("view");
+  } catch (err) {
+    alert("Failed to add zone: " + err.message);
+  }
+}
+
+async function removeZone(zoneId) {
+  try {
+    const res = await fetch("/api/trust/zone/" + zoneId, { method: "DELETE" });
+    const data = await res.json();
+    if (!data.ok) throw new Error(data.detail || "Server error");
+    manualZones = data.zones;
+    renderZoneList();
+    await reloadTrustLayer();
+  } catch (err) {
+    alert("Failed to remove zone: " + err.message);
+  }
+}
+
+function renderZoneList() {
+  const el = document.getElementById("zone-list");
+  if (manualZones.length === 0) {
+    el.innerHTML = '<div class="empty-hint">No manual zones yet</div>';
+    return;
+  }
+  el.innerHTML = manualZones.map(z => {
+    const color = z.trust_level < 0.1 ? "#FF4444"
+      : z.trust_level < 0.5 ? "#FFA500" : "#00CC88";
+    return `<div class="list-item">
+      <span class="list-dot" style="background:${color}"></span>
+      <span class="list-name">${z.label}</span>
+      <span class="list-meta">${z.trust_level.toFixed(2)}</span>
+      <button class="list-del" onclick="removeZone('${z.id}')" title="Remove">✕</button>
+    </div>`;
+  }).join("");
+}
+
+// ── Route generator ───────────────────────────────────────────────────────────
+async function generateRoute() {
+  if (!routeStart || !routeEnd) {
+    alert("Set both a start point (Route A mode) and an end point (Route B mode) first.");
+    return;
+  }
+  const statusEl = document.getElementById("route-gen-status");
+  statusEl.textContent = "Computing…";
+  try {
+    const res = await fetch("/api/route/generate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        start: [routeStart.lat, routeStart.lon],
+        end:   [routeEnd.lat,   routeEnd.lon]
+      })
+    });
+    const geojson = await res.json();
+    if (geojson.detail) throw new Error(geojson.detail);
+
+    const coords = geojson.geometry.coordinates; // [[lon,lat], ...]
+    const n = coords.length;
+
+    // Draw on Cesium
+    clearGeneratedRoute();
+    const positions = coords.map(c => Cesium.Cartesian3.fromDegrees(c[0], c[1]));
+    generatedRouteEntity = viewer.entities.add({
+      name: "Generated Route",
+      polyline: {
+        positions,
+        width: 4,
+        material: new Cesium.PolylineGlowMaterialProperty({
+          glowPower: 0.25,
+          color: Cesium.Color.CYAN
+        }),
+        clampToGround: true
+      }
+    });
+
+    // Draw on Leaflet
+    if (generatedRouteLeaflet) map2d.removeLayer(generatedRouteLeaflet);
+    const latlngs = coords.map(c => [c[1], c[0]]);
+    generatedRouteLeaflet = L.polyline(latlngs, { color: "#00FFFF", weight: 3, opacity: 0.85 }).addTo(map2d);
+
+    statusEl.textContent = `Route: ${n} waypoints`;
+    viewer.flyTo(generatedRouteEntity, { duration: 2.0 });
+  } catch (err) {
+    statusEl.textContent = "Error: " + err.message;
+  }
+}
+
+function clearGeneratedRoute() {
+  if (generatedRouteEntity) {
+    viewer.entities.remove(generatedRouteEntity);
+    generatedRouteEntity = null;
+  }
+  if (generatedRouteLeaflet && map2d) {
+    map2d.removeLayer(generatedRouteLeaflet);
+    generatedRouteLeaflet = null;
+  }
+  document.getElementById("route-gen-status").textContent = "";
+}
+
+// ── Labels ───────────────────────────────────────────────────────────────────
+function renderLabelList() {
+  const el = document.getElementById("label-list");
+  if (labels.length === 0) {
+    el.innerHTML = '<div class="empty-hint">Use Label mode, then click on 3D view</div>';
+    return;
+  }
+  el.innerHTML = labels.map((lb, idx) => `
+    <div class="list-item">
+      <span class="list-dot" style="background:#FFD700"></span>
+      <span class="list-name">${lb.text}</span>
+      <button class="list-fly" onclick="flyToLabel(${idx})" title="Fly to">⌖</button>
+      <button class="list-del" onclick="removeLabel(${idx})" title="Remove">✕</button>
+    </div>`).join("");
+}
+
+function flyToLabel(idx) {
+  const lb = labels[idx];
+  if (!lb) return;
+  viewer.camera.flyTo({
+    destination: Cesium.Cartesian3.fromDegrees(lb.lon, lb.lat, 200),
+    duration: 1.5
+  });
+}
+
+function removeLabel(idx) {
+  const lb = labels[idx];
+  if (!lb) return;
+  if (lb.cesiumEntity) viewer.entities.remove(lb.cesiumEntity);
+  if (lb.leafletMarker && map2d) map2d.removeLayer(lb.leafletMarker);
+  labels.splice(idx, 1);
+  renderLabelList();
+}
+
+function addLabel(lat, lon) {
+  const text = prompt("Enter label text:");
+  if (!text || !text.trim()) return;
+  const cesiumEntity = viewer.entities.add({
+    name: text,
+    position: Cesium.Cartesian3.fromDegrees(lon, lat, 5),
+    label: {
+      text,
+      font: "bold 14px Segoe UI, sans-serif",
+      fillColor: Cesium.Color.YELLOW,
+      outlineColor: Cesium.Color.BLACK,
+      outlineWidth: 2,
+      style: Cesium.LabelStyle.FILL_AND_OUTLINE,
+      verticalOrigin: Cesium.VerticalOrigin.BOTTOM,
+      pixelOffset: new Cesium.Cartesian2(0, -12),
+      disableDepthTestDistance: Number.POSITIVE_INFINITY
+    },
+    point: {
+      pixelSize: 8,
+      color: Cesium.Color.YELLOW,
+      outlineColor: Cesium.Color.BLACK,
+      outlineWidth: 1,
+      disableDepthTestDistance: Number.POSITIVE_INFINITY
+    }
+  });
+
+  let leafletMarker = null;
+  if (map2d) {
+    leafletMarker = L.marker([lat, lon], {
+      icon: L.divIcon({
+        className: "",
+        html: `<div style="background:#FFD700;color:#000;font-size:10px;padding:2px 5px;border-radius:3px;white-space:nowrap">${text}</div>`,
+        iconAnchor: [0, 0]
+      })
+    }).addTo(map2d);
+  }
+  labels.push({ lat, lon, text: text.trim(), cesiumEntity, leafletMarker });
+  renderLabelList();
 }
 
 // ── Viewer ───────────────────────────────────────────────────────────────────
@@ -182,13 +542,31 @@ satLayer = viewer.imageryLayers.addImageryProvider(
   })
 );
 
-// ── Camera update loop ───────────────────────────────────────────────────────
+// ── Camera update loop + 3D→2D sync ─────────────────────────────────────────
 const camStat = document.getElementById("stat-cam");
 viewer.scene.postRender.addEventListener(() => {
-  const alt = viewer.camera.positionCartographic.height;
+  const cart = viewer.camera.positionCartographic;
+  const alt = cart.height;
   camStat.textContent = alt >= 1000
     ? (alt / 1000).toFixed(1) + " km"
     : alt.toFixed(0) + " m";
+
+  // Throttled Cesium → Leaflet sync (~4 fps)
+  if (map2d) {
+    const now = Date.now();
+    if (now - _syncThrottleTs > 250) {
+      _syncThrottleTs = now;
+      const lat = Cesium.Math.toDegrees(cart.latitude);
+      const lon = Cesium.Math.toDegrees(cart.longitude);
+      const zoomAlt = [
+        [100, 18], [300, 17], [700, 16], [1500, 15],
+        [3000, 14], [7000, 13], [15000, 12], [30000, 11],
+        [70000, 10], [Infinity, 9]
+      ];
+      const zoom = (zoomAlt.find(([a]) => alt < a) || [, 9])[1];
+      map2d.setView([lat, lon], zoom, { animate: false });
+    }
+  }
 });
 
 // ── Fetch bounds → fly to area on startup ────────────────────────────────────
@@ -196,10 +574,10 @@ setProgress(30, "Fetching map bounds…");
 fetch("/api/bounds")
   .then(r => r.json())
   .then(b => {
+    boundsData = b;
     viewer.camera.flyTo({
       destination: Cesium.Cartesian3.fromDegrees(
-        b.lon_center, b.lat_center,
-        3500               // start altitude ~3.5 km above terrain
+        b.lon_center, b.lat_center, 3500
       ),
       orientation: {
         heading: Cesium.Math.toRadians(0),
@@ -208,6 +586,53 @@ fetch("/api/bounds")
       },
       duration: 2.5
     });
+
+    // ── Init Leaflet minimap now that we have bounds ─────────────────
+    map2d = L.map("map2d", { zoomControl: true, attributionControl: false });
+    map2dSatLayer = L.tileLayer("/tile/sat/{z}/{x}/{y}.png", {
+      maxZoom: 19, tileSize: 256
+    }).addTo(map2d);
+    map2d.setView([b.lat_center, b.lon_center], 14);
+
+    // Leaflet click → mode actions
+    map2d.on("click", e => {
+      const { lat, lng: lon } = e.latlng;
+      if (currentMode === "trust_add" || currentMode === "trust_block") {
+        zoneVertices.push([lat, lon]);
+        const m = L.circleMarker([lat, lon], {
+          radius: 4, color: currentMode === "trust_block" ? "#FF4444" : "#FFD700",
+          fillOpacity: 0.9, weight: 1
+        }).addTo(map2d);
+        zoneMarkers.push(m);
+        _updateZonePreview();
+      } else if (currentMode === "route_a") {
+        routeStart = { lat, lon };
+        if (routeStartMarker) map2d.removeLayer(routeStartMarker);
+        routeStartMarker = L.circleMarker([lat, lon], {
+          radius: 6, color: "#00FF7F", fillColor: "#00FF7F", fillOpacity: 0.9, weight: 2
+        }).bindTooltip("Start", { permanent: false }).addTo(map2d);
+        document.getElementById("route-start-txt").textContent =
+          lat.toFixed(5) + ", " + lon.toFixed(5);
+        setMode("view");
+      } else if (currentMode === "route_b") {
+        routeEnd = { lat, lon };
+        if (routeEndMarker) map2d.removeLayer(routeEndMarker);
+        routeEndMarker = L.circleMarker([lat, lon], {
+          radius: 6, color: "#FF4444", fillColor: "#FF4444", fillOpacity: 0.9, weight: 2
+        }).bindTooltip("End", { permanent: false }).addTo(map2d);
+        document.getElementById("route-end-txt").textContent =
+          lat.toFixed(5) + ", " + lon.toFixed(5);
+        setMode("view");
+      } else {
+        // view mode: fly Cesium to clicked location
+        viewer.camera.flyTo({
+          destination: Cesium.Cartesian3.fromDegrees(lon, lat, 800),
+          orientation: { heading: 0, pitch: Cesium.Math.toRadians(-50), roll: 0 },
+          duration: 1.2
+        });
+      }
+    });
+
     setProgress(50, "Loading GPS routes…");
     return fetch("/api/routes");
   })
@@ -241,20 +666,22 @@ async function loadRoutes(geojson) {
   const legendRows = document.getElementById("legend-rows");
   legendRows.innerHTML = "";
 
+  // Clear old Leaflet route layers
+  routeLeafletLayers.forEach(l => map2d && map2d.removeLayer(l));
+  routeLeafletLayers = [];
+
   for (const feature of features) {
     const props = feature.properties;
     const coords = feature.geometry.coordinates; // [lon, lat, alt]
     const color = hexToCesiumColor(props.color);
     totalPts += coords.length;
 
-    // ── Polyline entity (clamped to ground) ─────────────────────────
-    // Drop z — Cesium EllipsoidTerrainProvider has ground at 0m ellipsoid;
-    // GPS MSL altitudes (~490 m) would float the routes high in the sky.
+    // ── Cesium polyline (clamped to ground) ──────────────────────────
     const positions = coords.map(c => Cesium.Cartesian3.fromDegrees(c[0], c[1]));
     const entity = viewer.entities.add({
       name: props.name,
       polyline: {
-        positions: positions,
+        positions,
         width: 3.0,
         material: new Cesium.ColorMaterialProperty(color),
         clampToGround: true
@@ -262,24 +689,30 @@ async function loadRoutes(geojson) {
     });
     routeEntities.push(entity);
 
+    // ── Leaflet polyline ─────────────────────────────────────────────
+    if (map2d) {
+      const latlngs = coords.map(c => [c[1], c[0]]);
+      const leafletLine = L.polyline(latlngs, {
+        color: props.color, weight: 2, opacity: 0.75
+      }).addTo(map2d);
+      routeLeafletLayers.push(leafletLine);
+    }
+
     // ── Legend row ───────────────────────────────────────────────────
+    const idx = routeEntities.length - 1;
     const row = document.createElement("div");
-    row.className = "legend-row";
-    row.dataset.idx = routeEntities.length - 1;
+    row.className = "list-item";
     row.innerHTML = `
-      <div class="legend-swatch" style="background:${props.color}"></div>
-      <span class="legend-name">${props.name}</span>`;
-    row.onclick = () => {
-      const e = routeEntities[+row.dataset.idx];
-      viewer.flyTo(e, { duration: 1.5 });
-    };
+      <span class="list-swatch" style="background:${props.color}"></span>
+      <span class="list-name">${props.name}</span>
+      <button class="list-fly" title="Fly to">⌖</button>`;
+    row.querySelector(".list-fly").onclick = () => viewer.flyTo(routeEntities[idx], { duration: 1.5 });
     legendRows.appendChild(row);
   }
 
   document.getElementById("stat-routes").textContent = features.length;
   document.getElementById("stat-pts").textContent    = totalPts.toLocaleString();
 
-  // elevation stats from DEM
   fetch("/api/dem")
     .then(r => r.json())
     .then(d => {
@@ -348,6 +781,17 @@ async function loadTrustLayer() {
   trustPrimitive.show = layers.trust;
 }
 
+// ── Reload trust layer (removes old primitive then rebuilds) ──────────────────
+async function reloadTrustLayer() {
+  if (trustPrimitive) {
+    viewer.scene.primitives.remove(trustPrimitive);
+    trustPrimitive = null;
+  }
+  layers.trust = true;
+  document.getElementById("btn-trust").classList.add("active");
+  await loadTrustLayer();
+}
+
 // ── Layer toggle ──────────────────────────────────────────────────────────────
 function toggleLayer(name) {
   layers[name] = !layers[name];
@@ -382,6 +826,19 @@ handler.setInputAction(movement => {
     tooltip.style.display = "none";
   }
 }, Cesium.ScreenSpaceEventType.MOUSE_MOVE);
+
+// ── Left click on 3D globe (label mode) ──────────────────────────────────────
+handler.setInputAction(click => {
+  if (currentMode !== "label") return;
+  const ray = viewer.camera.getPickRay(click.position);
+  if (!ray) return;
+  const cartesian = viewer.scene.globe.pick(ray, viewer.scene);
+  if (!cartesian) return;
+  const carto = Cesium.Cartographic.fromCartesian(cartesian);
+  const lat = Cesium.Math.toDegrees(carto.latitude);
+  const lon = Cesium.Math.toDegrees(carto.longitude);
+  addLabel(lat, lon);
+}, Cesium.ScreenSpaceEventType.LEFT_CLICK);
 
 // ── Double-click: reset camera to overview ─────────────────────────────────────
 handler.setInputAction(() => {
