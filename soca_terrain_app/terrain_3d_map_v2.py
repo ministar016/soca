@@ -19,7 +19,7 @@ import cv2
 import numpy as np
 import requests
 
-MAPS_DIR = "/home/mn/soca/bazel_workspace/Maps"
+MAPS_DIR = os.path.dirname(os.path.abspath(__file__))
 
 # soca_map package lives alongside this script
 if MAPS_DIR not in sys.path:
@@ -716,6 +716,24 @@ print(
 
 
 # ── Trust overlay PNG za 2D panel ────────────────────────────────────────────
+def _make_seg_overlay_b64(cm):
+    import io
+
+    import matplotlib.pyplot as plt
+    from matplotlib.colors import Normalize
+    from PIL import Image as _PIL_Image
+
+    norm = Normalize(vmin=0, vmax=1)
+    rgba = plt.cm.RdYlGn_r(norm(cm))  # RGBA float 0-1
+    # Transparent where clear (cm around 0.3)
+    rgba[:, :, 3] = np.where(cm < 0.5, 0.1, 0.85)  # High alpha for obstacles
+    rgba_bytes = (rgba * 255).astype(np.uint8)
+    img = _PIL_Image.fromarray(rgba_bytes, "RGBA")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    return base64.b64encode(buf.getvalue()).decode()
+
+
 def _make_trust_overlay_b64(tm):
     """Pretvara trust_map u RGBA PNG (isti colorscale) za 2D satelitski panel."""
     from PIL import Image as _PIL_Image
@@ -759,6 +777,7 @@ def _make_trust_overlay_b64(tm):
 
 
 trust_overlay_b64 = _make_trust_overlay_b64(trust_map)
+seg_overlay_b64 = _make_seg_overlay_b64(cost_map)
 
 # Serialize terrain grids for JS interactive routing engine
 _js_cost_data = json.dumps([round(float(v), 3) for v in cost_map.ravel()])
@@ -1153,8 +1172,7 @@ fig.update_layout(
             gridcolor="rgba(100,100,150,0.3)",
         ),
         bgcolor="rgb(8,8,18)",
-        aspectmode="manual",
-        aspectratio=dict(x=1.8, y=1.8, z=0.35),
+        aspectmode="data",
         camera=dict(eye=dict(x=1.3, y=-1.3, z=0.85)),
     ),
     paper_bgcolor="rgb(12,12,25)",
@@ -1210,7 +1228,10 @@ if sat_b64:
         <img id="sat-img" src="data:image/png;base64,{sat_b64}" alt="Satelitska snimka"/>
         <img id="trust-overlay-img" src="data:image/png;base64,{trust_overlay_b64}"
              alt="Trust overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;
-             pointer-events:none;image-rendering:pixelated;opacity:0.72;"/>
+             pointer-events:none;image-rendering:pixelated;opacity:0;"/>
+        <img id="seg-overlay-img" src="data:image/png;base64,{seg_overlay_b64}"
+             alt="Segmentation overlay" style="position:absolute;top:0;left:0;width:100%;height:100%;
+             pointer-events:none;image-rendering:pixelated;opacity:0;"/>
         <svg id="sat-overlay" viewBox="0 0 100 100" preserveAspectRatio="none">
           <polyline points="{p1_svg_pts}" fill="none" stroke="gold" stroke-width="0.9"
                     stroke-opacity="0.92" vector-effect="non-scaling-stroke"/>
@@ -1431,6 +1452,25 @@ full_html = f"""<!DOCTYPE html>
       // ── 2D panel zoom / pan ──────────────────────────────────────────────
       var zs = {{ z: 1, dx: 0, dy: 0, drag: false, lx: 0, ly: 0, follow: true }};
       var satInner = document.getElementById('sat-inner');
+      var plotEl = document.getElementById('plotly-3d');
+      if (plotEl) {{
+        plotEl.on('plotly_buttonclicked', function(data) {{
+          if (!data || !data.menu || !data.button) return;
+          var btnLabel = data.menu.buttons[data.button.active].label;
+          var trustOverlay = document.getElementById('trust-overlay-img');
+          var segOverlay = document.getElementById('seg-overlay-img');
+          if (btnLabel === 'Satelitski' || btnLabel === 'Topografija') {{
+             if(trustOverlay) trustOverlay.style.opacity = '0';
+             if(segOverlay) segOverlay.style.opacity = '0';
+          }} else if (btnLabel === 'Hybrid') {{
+             if(trustOverlay) trustOverlay.style.opacity = '0';
+             if(segOverlay) segOverlay.style.opacity = '0.72';
+          }} else if (btnLabel === 'Trusted Area') {{
+             if(trustOverlay) trustOverlay.style.opacity = '0.72';
+             if(segOverlay) segOverlay.style.opacity = '0';
+          }}
+        }});
+      }}
       var satCont  = document.getElementById('sat-container');
       var zoomLbl  = document.getElementById('zoom-lbl');
       var btnFollow = document.getElementById('btn-follow');
@@ -1840,6 +1880,7 @@ from matplotlib.colors import Normalize
 
 fig2 = plt.figure(figsize=(18, 11), facecolor="#08080e")
 ax = fig2.add_subplot(111, projection="3d", facecolor="#08080e")
+ax.set_box_aspect((np.ptp(XX), np.ptp(YY), np.ptp(elev_s) * 3))
 
 norm = Normalize(vmin=0, vmax=1)
 colors = plt.cm.RdYlGn_r(norm(cost_map))

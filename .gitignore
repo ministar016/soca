@@ -200,3 +200,14 @@ playwright-report/
 .temp/
 bazel_workspace/Maps/api_key
 bazel_workspace/Maps/api_key
+soca_terrain_app/terrain_3d_result.html
+soca_terrain_app/terrain_3d_result.png
+soca_terrain_app/elevation_cache.json
+soca_terrain_app/elevation_meta.json
+soca_terrain_app/satellite_meta.json
+soca_terrain_app/satellite_tile.png
+soca_terrain_app/trust_db.jsonl
+soca_terrain_app/results/
+soca_terrain_app/__pycache__/
+soca_terrain_app/soca_map/__pycache__/
+soca_terrain_app/*.html
