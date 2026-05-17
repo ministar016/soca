@@ -312,7 +312,7 @@ async def add_trust_zone(req: TrustZoneReq):
         }
     )
     _recompute_trust()
-    return {"ok": True, "zone_id": zone_id, "zones": len(_manual_zones)}
+    return {"ok": True, "zone_id": zone_id, "zones": _manual_zones}
 
 
 @app.delete("/api/trust/zone/{zone_id}")
@@ -321,7 +321,7 @@ async def remove_trust_zone(zone_id: str):
     global _manual_zones
     _manual_zones = [z for z in _manual_zones if z["id"] != zone_id]
     _recompute_trust()
-    return {"ok": True, "zones": len(_manual_zones)}
+    return {"ok": True, "zones": _manual_zones}
 
 
 @app.get("/api/trust/zones")
